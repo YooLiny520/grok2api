@@ -104,11 +104,9 @@ export function AccountsPage() {
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const quickImportFileInputRef = useRef<HTMLInputElement>(null);
-  const quotaSyncAbortRef = useRef<AbortController | null>(null);
   const renewalAbortRef = useRef<AbortController | null>(null);
   const conversionAbortRef = useRef<AbortController | null>(null);
   const webConsoleSyncAbortRef = useRef<AbortController | null>(null);
-  const webAccountScriptsAbortRef = useRef<AbortController | null>(null);
   const importAbortRef = useRef<AbortController | null>(null);
   const importToastRef = useRef<string | number | null>(null);
   const [provider, setProvider] = useState<AccountProvider>("grok_build");
@@ -126,14 +124,12 @@ export function AccountsPage() {
   const [cleanupStatuses, setCleanupStatuses] = useState<Set<AccountCleanupStatus>>(() => new Set());
   const [exportOpen, setExportOpen] = useState(false);
   const [syncAllOpen, setSyncAllOpen] = useState(false);
-  const [quotaSyncProgress, setQuotaSyncProgress] = useState<AccountTaskProgressDTO | null>(null);
   const [webConversionTargets, setWebConversionTargets] = useState<string[] | "all" | null>(null);
   const [webConversionTarget, setWebConversionTarget] = useState<WebConversionTarget>("build");
   const [webConversionStrategy, setWebConversionStrategy] = useState<BuildConversionStrategy>("missing");
   const [conversionProgress, setConversionProgress] = useState<BuildConversionProgressState | null>(null);
   const [webConsoleSyncProgress, setWebConsoleSyncProgress] = useState<AccountTaskProgressDTO | null>(null);
   const [webAccountScriptsTargets, setWebAccountScriptsTargets] = useState<string[] | "all" | null>(null);
-  const [webAccountScriptsProgress, setWebAccountScriptsProgress] = useState<AccountTaskProgressDTO | null>(null);
   const [renewAllOpen, setRenewAllOpen] = useState(false);
   const [renewalProgress, setRenewalProgress] = useState<AccountTaskProgressDTO | null>(null);
   const [editing, setEditing] = useState<AccountDTO | null>(null);
@@ -147,12 +143,10 @@ export function AccountsPage() {
   const debouncedSearch = useDebouncedValue(search);
 
   useEffect(() => () => {
-    quotaSyncAbortRef.current?.abort();
-    renewalAbortRef.current?.abort();
+        renewalAbortRef.current?.abort();
     conversionAbortRef.current?.abort();
     webConsoleSyncAbortRef.current?.abort();
-    webAccountScriptsAbortRef.current?.abort();
-    importAbortRef.current?.abort();
+        importAbortRef.current?.abort();
     if (importToastRef.current !== null) toast.dismiss(importToastRef.current);
   }, []);
 
@@ -299,7 +293,6 @@ export function AccountsPage() {
 
   const quotaSyncMutation = useMutation({
     mutationFn: async (targetProvider: AccountProvider) => {
-      setQuotaSyncProgress(null);
       setSyncAllOpen(false);
       const job = targetProvider === "grok_web"
         ? await startRefreshAllWebAccountQuotas()
@@ -359,7 +352,6 @@ export function AccountsPage() {
 
   const webAccountScriptsMutation = useMutation({
     mutationFn: async (input: WebAccountScriptsInput) => {
-      setWebAccountScriptsProgress(null);
       setWebAccountScriptsTargets(null);
       clearSelection();
       const job = await startRunWebAccountScripts(input);
@@ -895,7 +887,7 @@ export function AccountsPage() {
         <WebAccountScriptsDialog
           targets={webAccountScriptsTargets}
           pending={webAccountScriptsMutation.isPending}
-          progress={webAccountScriptsProgress}
+          progress={null}
           onClose={() => {
             setWebAccountScriptsTargets(null);
           }}
