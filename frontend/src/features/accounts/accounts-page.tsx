@@ -48,15 +48,15 @@ import {
   listAccounts,
   pollDeviceAuthorization,
   refreshAccountBilling,
-  refreshAccountsQuota,
   refreshAccountsTokens,
   refreshAccountToken,
   refreshAccountQuota,
-  refreshAllAccountBilling,
   refreshAllAccountTokens,
-  refreshAllConsoleAccountQuotas,
-  refreshAllWebAccountQuotas,
-  runWebAccountScripts,
+  startRefreshAllAccountBilling,
+  startRefreshAllConsoleAccountQuotas,
+  startRefreshAllWebAccountQuotas,
+  startRefreshAccountsQuota,
+  startRunWebAccountScripts,
   setWebAccountBirthDate,
   startDeviceAuthorization,
   syncWebAccountsToConsole,
@@ -78,6 +78,7 @@ import {
 } from "@/features/accounts/accounts-api";
 import { AccountQuota, ConsoleQuota, WebQuota } from "@/features/accounts/account-quota";
 import { AccountNameCell } from "@/features/accounts/account-name-cell";
+import { useAdminJobTracker } from "@/features/accounts/admin-job-tracker";
 import { WebAccountScriptsDialog } from "@/features/accounts/web-account-scripts";
 import { WebAccountSettingsDialogs, WebAccountSettingsMenu, type WebAccountConfirmationTarget } from "@/features/accounts/web-account-settings";
 
@@ -98,6 +99,7 @@ type AccountSelection = {
 };
 
 export function AccountsPage() {
+  const { trackJob } = useAdminJobTracker();
   const { t, i18n } = useTranslation();
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -296,34 +298,18 @@ export function AccountsPage() {
   });
 
   const quotaSyncMutation = useMutation({
-    mutationFn: (targetProvider: AccountProvider) => {
-      const controller = new AbortController();
-      quotaSyncAbortRef.current = controller;
+    mutationFn: async (targetProvider: AccountProvider) => {
       setQuotaSyncProgress(null);
       setSyncAllOpen(false);
-      const toastId = toast.loading(t("accounts.backgroundJobStarted"));
-      const onProgress = (progress: AccountTaskProgressDTO) => {
-        setQuotaSyncProgress(progress);
-        toast.loading(t("accounts.backgroundJobProgress", {
-          completed: progress.completed,
-          total: progress.total > 0 ? progress.total : "…",
-        }), { id: toastId });
-      };
-      const run = targetProvider === "grok_web"
-        ? refreshAllWebAccountQuotas(onProgress, controller.signal)
+      const job = targetProvider === "grok_web"
+        ? await startRefreshAllWebAccountQuotas()
         : targetProvider === "grok_console"
-          ? refreshAllConsoleAccountQuotas(onProgress, controller.signal)
-          : refreshAllAccountBilling(onProgress, controller.signal);
-      return run.then((result) => ({ result, toastId })).catch((error) => {
-        toast.dismiss(toastId);
-        throw error;
-      });
-    },
-    onSuccess: ({ result, toastId }) => {
-      toast.success(t("accounts.allBillingRefreshed", result), { id: toastId });
+          ? await startRefreshAllConsoleAccountQuotas()
+          : await startRefreshAllAccountBilling();
+      trackJob(job);
+      return job;
     },
     onError: (error) => { if (!isAbortError(error)) showError(error); },
-    onSettled: () => { quotaSyncAbortRef.current = null; setQuotaSyncProgress(null); invalidateAccountData(); },
   });
   const conversionMutation = useMutation({
     mutationFn: (input: BuildConversionInput) => {
@@ -372,40 +358,15 @@ export function AccountsPage() {
   });
 
   const webAccountScriptsMutation = useMutation({
-    mutationFn: (input: WebAccountScriptsInput) => {
-      const controller = new AbortController();
-      webAccountScriptsAbortRef.current = controller;
+    mutationFn: async (input: WebAccountScriptsInput) => {
       setWebAccountScriptsProgress(null);
       setWebAccountScriptsTargets(null);
       clearSelection();
-      const toastId = toast.loading(t("accounts.backgroundJobStarted"));
-      const onProgress = (progress: AccountTaskProgressDTO) => {
-        setWebAccountScriptsProgress(progress);
-        toast.loading(t("accounts.backgroundJobProgress", {
-          completed: progress.completed,
-          total: progress.total > 0 ? progress.total : "…",
-        }), { id: toastId });
-      };
-      return runWebAccountScripts(input, onProgress, controller.signal)
-        .then((result) => ({ result, toastId }))
-        .catch((error) => {
-          toast.dismiss(toastId);
-          throw error;
-        });
-    },
-    onSuccess: ({ result, toastId }) => {
-      if (result.failed > 0) {
-        toast.warning(t("webAccountScripts.completedWithFailures", result), { id: toastId });
-      } else {
-        toast.success(t("webAccountScripts.completed", result), { id: toastId });
-      }
+      const job = await startRunWebAccountScripts(input);
+      trackJob(job);
+      return job;
     },
     onError: (error) => { if (!isAbortError(error)) showError(error); },
-    onSettled: () => {
-      webAccountScriptsAbortRef.current = null;
-      setWebAccountScriptsProgress(null);
-      invalidateAccountData();
-    },
   });
 
   const importMutation = useMutation({
@@ -466,27 +427,13 @@ export function AccountsPage() {
   });
 
   const batchBillingMutation = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
       const ids = [...selected];
-      const toastId = toast.loading(t("accounts.backgroundJobStarted"));
-      const onProgress = (progress: AccountTaskProgressDTO) => {
-        toast.loading(t("accounts.backgroundJobProgress", {
-          completed: progress.completed,
-          total: progress.total > 0 ? progress.total : "…",
-        }), { id: toastId });
-      };
-      return refreshAccountsQuota(ids, provider, onProgress)
-        .then((result) => ({ result, toastId }))
-        .catch((error) => {
-          toast.dismiss(toastId);
-          throw error;
-        });
-    },
-    onSuccess: ({ result, toastId }) => {
-      toast.success(t("accounts.batchBillingRefreshed", result), { id: toastId });
+      const job = await startRefreshAccountsQuota(ids, provider);
+      trackJob(job);
+      return job;
     },
     onError: showError,
-    onSettled: () => invalidateAccountData(),
   });
 
   const batchTokenMutation = useMutation({
@@ -950,17 +897,16 @@ export function AccountsPage() {
           pending={webAccountScriptsMutation.isPending}
           progress={webAccountScriptsProgress}
           onClose={() => {
-            webAccountScriptsAbortRef.current?.abort();
             setWebAccountScriptsTargets(null);
           }}
           onRun={runSelectedWebAccountScripts}
         />
       ) : null}
 
-      <AlertDialog open={syncAllOpen} onOpenChange={(open) => { if (!open) quotaSyncAbortRef.current?.abort(); setSyncAllOpen(open); }}>
+      <AlertDialog open={syncAllOpen} onOpenChange={setSyncAllOpen}>
         <AlertDialogContent>
           <AlertDialogHeader><AlertDialogTitle>{t("accounts.syncAllTitle")}</AlertDialogTitle><AlertDialogDescription>{t(provider === "grok_web" ? "accounts.syncAllWebDescription" : provider === "grok_console" ? "console.syncAllDescription" : "accounts.syncAllDescription")}</AlertDialogDescription></AlertDialogHeader>
-          <AlertDialogFooter><AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel><AlertDialogAction disabled={quotaSyncMutation.isPending} onClick={(event) => { event.preventDefault(); quotaSyncMutation.mutate(provider); }}>{quotaSyncMutation.isPending ? <><Spinner />{quotaSyncProgress ? <span className="tabular-nums">{quotaSyncProgress.completed} / {quotaSyncProgress.total}</span> : t("common.loading")}</> : t("accounts.syncAll")}</AlertDialogAction></AlertDialogFooter>
+          <AlertDialogFooter><AlertDialogCancel>{t("common.cancel")}</AlertDialogCancel><AlertDialogAction disabled={quotaSyncMutation.isPending} onClick={(event) => { event.preventDefault(); quotaSyncMutation.mutate(provider); }}>{quotaSyncMutation.isPending ? <><Spinner />{t("common.loading")}</> : t("accounts.syncAll")}</AlertDialogAction></AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 

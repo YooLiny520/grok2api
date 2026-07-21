@@ -18,6 +18,7 @@ import { useAuth } from "@/shared/auth/use-auth";
 import { GitHubMark } from "@/shared/components/github-mark";
 import { SiteFooter } from "@/shared/components/site-footer";
 import { cn } from "@/shared/lib/cn";
+import { AdminJobTrackerProvider } from "@/features/accounts/admin-job-tracker";
 import { CurrentVersionLabel } from "@/features/system/version-update";
 
 const navigation = [
@@ -215,6 +216,7 @@ export function AppShell() {
   );
 
   return (
+    <AdminJobTrackerProvider>
     <div className="min-h-screen bg-background">
         <aside className="fixed inset-y-0 left-0 z-30 hidden h-screen w-[288px] flex-col overflow-hidden bg-sidebar px-4 py-6 lg:flex">
           <div className="flex h-7 shrink-0 items-center justify-between px-2.5">
@@ -270,5 +272,6 @@ export function AppShell() {
         </DialogContent>
       </Dialog>
     </div>
+    </AdminJobTrackerProvider>
   );
 }

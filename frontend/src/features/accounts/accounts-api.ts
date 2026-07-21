@@ -425,6 +425,15 @@ export function getAccountAdminJob(id: string, signal?: AbortSignal): Promise<Ac
   return apiRequest(`/api/admin/v1/accounts/jobs/${encodeURIComponent(id)}`, { method: "GET", signal }, decodeAccountAdminJob);
 }
 
+export function listAccountAdminJobs(signal?: AbortSignal): Promise<AccountAdminJobDTO[]> {
+  return apiRequest("/api/admin/v1/accounts/jobs", { method: "GET", signal }, (value) => {
+    if (!value || typeof value !== "object" || !Array.isArray((value as { items?: unknown }).items)) {
+      throw new Error("invalid account admin jobs response");
+    }
+    return (value as { items: unknown[] }).items.map((item) => decodeAccountAdminJob(item));
+  });
+}
+
 export function cancelAccountAdminJob(id: string): Promise<AccountAdminJobDTO> {
   return apiRequest(`/api/admin/v1/accounts/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" }, decodeAccountAdminJob);
 }
@@ -511,6 +520,27 @@ export function runWebAccountScripts(input: WebAccountScriptsInput, onProgress?:
     onProgress,
     signal,
   );
+}
+
+
+export function startRefreshAllAccountBilling(): Promise<AccountAdminJobDTO> {
+  return apiRequest("/api/admin/v1/accounts/refresh-billing", { method: "POST" }, decodeAccountAdminJob);
+}
+
+export function startRefreshAllWebAccountQuotas(): Promise<AccountAdminJobDTO> {
+  return apiRequest("/api/admin/v1/accounts/web/refresh-quotas", { method: "POST" }, decodeAccountAdminJob);
+}
+
+export function startRefreshAllConsoleAccountQuotas(): Promise<AccountAdminJobDTO> {
+  return apiRequest("/api/admin/v1/accounts/console/refresh-quotas", { method: "POST" }, decodeAccountAdminJob);
+}
+
+export function startRunWebAccountScripts(input: WebAccountScriptsInput): Promise<AccountAdminJobDTO> {
+  return apiRequest("/api/admin/v1/accounts/web/run-scripts", { method: "POST", body: input }, decodeAccountAdminJob);
+}
+
+export function startRefreshAccountsQuota(ids: string[], provider: AccountProvider): Promise<AccountAdminJobDTO> {
+  return apiRequest("/api/admin/v1/accounts/batch/refresh-quotas", { method: "POST", body: { ids, provider } }, decodeAccountAdminJob);
 }
 
 export function importAccounts(files: readonly File[], onProgress?: (value: AccountTaskProgressDTO) => void, signal?: AbortSignal): Promise<AccountImportResultDTO> {
