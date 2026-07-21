@@ -72,23 +72,12 @@ func (h *Handler) runWebAccountScripts(c *gin.Context) {
 		}
 	}
 
-	stream := newAccountEventStream(c)
-	defer stream.Close()
-	var (
-		succeeded int
-		failed    int
-		err       error
-	)
-	if request.All {
-		succeeded, failed, err = h.service.RunAllWebAccountScriptsWithProgress(c.Request.Context(), request.Actions.options(), stream.ProgressObserver())
-	} else {
-		succeeded, failed, err = h.service.RunWebAccountScriptsWithProgress(c.Request.Context(), ids, request.Actions.options(), stream.ProgressObserver())
-	}
+	job, err := h.service.StartWebAccountScriptsJob(ids, request.All, request.Actions.options())
 	if err != nil {
-		stream.WriteError("webAccountScriptFailed", "执行 Grok Web 账号脚本失败")
+		h.writeServiceError(c, "webAccountScriptFailed", err, http.StatusConflict, "启动 Grok Web 账号脚本失败")
 		return
 	}
-	_ = stream.Write("complete", accountBatchResponse{Succeeded: succeeded, Failed: failed})
+	response.Success(c, http.StatusAccepted, newAdminJobResponse(job))
 }
 
 func uniqueWebAccountScriptIDs(ids []uint64) []uint64 {

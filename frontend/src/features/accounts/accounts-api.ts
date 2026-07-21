@@ -1,4 +1,4 @@
-import { ApiError, apiDownload, apiEventStream, apiRequest, type PaginatedDTO } from "@/shared/api/client";
+﻿import { ApiError, apiDownload, apiEventStream, apiRequest, type PaginatedDTO } from "@/shared/api/client";
 import { createObjectDecoder, createPaginatedDecoder, createValidatedDecoder, decodeBooleanResult, decodeCountResult, hasShape, isArrayOf, isBoolean, isNumber, isOneOf, isOptional, isRecordOf, isString } from "@/shared/api/decoder";
 import { i18n } from "@/shared/i18n";
 import type { SortOrder } from "@/shared/lib/table-sort";
@@ -393,8 +393,88 @@ async function runAccountTask<T>(path: string, body: BodyInit | object | undefin
   return result;
 }
 
+export type AccountAdminJobDTO = {
+  id: string;
+  kind: string;
+  status: "running" | "succeeded" | "failed" | "canceled";
+  completed: number;
+  total: number;
+  succeeded: number;
+  failed: number;
+  message?: string;
+  error?: string;
+  startedAt: string;
+  finishedAt?: string;
+};
+
+const decodeAccountAdminJob = createObjectDecoder<AccountAdminJobDTO>("account admin job", {
+  id: isString,
+  kind: isString,
+  status: (value): value is AccountAdminJobDTO["status"] => value === "running" || value === "succeeded" || value === "failed" || value === "canceled",
+  completed: isNumber,
+  total: isNumber,
+  succeeded: isNumber,
+  failed: isNumber,
+  message: isOptional(isString),
+  error: isOptional(isString),
+  startedAt: isString,
+  finishedAt: isOptional(isString),
+});
+
+export function getAccountAdminJob(id: string, signal?: AbortSignal): Promise<AccountAdminJobDTO> {
+  return apiRequest(`/api/admin/v1/accounts/jobs/${encodeURIComponent(id)}`, { method: "GET", signal }, decodeAccountAdminJob);
+}
+
+export function cancelAccountAdminJob(id: string): Promise<AccountAdminJobDTO> {
+  return apiRequest(`/api/admin/v1/accounts/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" }, decodeAccountAdminJob);
+}
+
+async function waitForAccountAdminJob(
+  start: Promise<AccountAdminJobDTO>,
+  onProgress?: (value: AccountTaskProgressDTO) => void,
+  signal?: AbortSignal,
+): Promise<AccountBatchResultDTO> {
+  const started = await start;
+  onProgress?.({ completed: started.completed, total: Math.max(started.total, 0) });
+  let current = started;
+  while (current.status === "running") {
+    if (signal?.aborted) {
+      try { await cancelAccountAdminJob(current.id); } catch { /* ignore cancel errors while aborting */ }
+      throw new DOMException("Aborted", "AbortError");
+    }
+    await new Promise<void>((resolve, reject) => {
+      const timer = window.setTimeout(() => resolve(), 1500);
+      const onAbort = () => {
+        window.clearTimeout(timer);
+        reject(new DOMException("Aborted", "AbortError"));
+      };
+      if (signal) {
+        if (signal.aborted) {
+          window.clearTimeout(timer);
+          reject(new DOMException("Aborted", "AbortError"));
+          return;
+        }
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+    });
+    current = await getAccountAdminJob(current.id, signal);
+    onProgress?.({ completed: current.completed, total: Math.max(current.total, current.completed) });
+  }
+  if (current.status === "failed") {
+    throw new ApiError(502, "adminJobFailed", current.error || i18n.t("apiErrors.requestFailed"));
+  }
+  if (current.status === "canceled") {
+    throw new DOMException("Aborted", "AbortError");
+  }
+  return { succeeded: current.succeeded, failed: current.failed };
+}
+
 export function refreshAllAccountBilling(onProgress?: (value: AccountTaskProgressDTO) => void, signal?: AbortSignal): Promise<AccountBatchResultDTO> {
-  return runAccountTask("/api/admin/v1/accounts/refresh-billing", undefined, ["succeeded", "failed"], onProgress, signal);
+  return waitForAccountAdminJob(
+    apiRequest("/api/admin/v1/accounts/refresh-billing", { method: "POST" }, decodeAccountAdminJob),
+    onProgress,
+    signal,
+  );
 }
 
 export function refreshAllAccountTokens(onProgress?: (value: AccountTaskProgressDTO) => void, signal?: AbortSignal): Promise<AccountTokenRefreshResultDTO> {
@@ -402,11 +482,19 @@ export function refreshAllAccountTokens(onProgress?: (value: AccountTaskProgress
 }
 
 export function refreshAllWebAccountQuotas(onProgress?: (value: AccountTaskProgressDTO) => void, signal?: AbortSignal): Promise<AccountBatchResultDTO> {
-  return runAccountTask("/api/admin/v1/accounts/web/refresh-quotas", undefined, ["succeeded", "failed"], onProgress, signal);
+  return waitForAccountAdminJob(
+    apiRequest("/api/admin/v1/accounts/web/refresh-quotas", { method: "POST" }, decodeAccountAdminJob),
+    onProgress,
+    signal,
+  );
 }
 
 export function refreshAllConsoleAccountQuotas(onProgress?: (value: AccountTaskProgressDTO) => void, signal?: AbortSignal): Promise<AccountBatchResultDTO> {
-  return runAccountTask("/api/admin/v1/accounts/console/refresh-quotas", undefined, ["succeeded", "failed"], onProgress, signal);
+  return waitForAccountAdminJob(
+    apiRequest("/api/admin/v1/accounts/console/refresh-quotas", { method: "POST" }, decodeAccountAdminJob),
+    onProgress,
+    signal,
+  );
 }
 
 export function convertWebAccountsToBuild(input: BuildConversionInput, onProgress?: (value: AccountTaskProgressDTO) => void, signal?: AbortSignal): Promise<BuildConversionResultDTO> {
@@ -418,7 +506,11 @@ export function syncWebAccountsToConsole(input: WebConsoleSyncInput, onProgress?
 }
 
 export function runWebAccountScripts(input: WebAccountScriptsInput, onProgress?: (value: AccountTaskProgressDTO) => void, signal?: AbortSignal): Promise<AccountBatchResultDTO> {
-  return runAccountTask("/api/admin/v1/accounts/web/run-scripts", input, ["succeeded", "failed"], onProgress, signal);
+  return waitForAccountAdminJob(
+    apiRequest("/api/admin/v1/accounts/web/run-scripts", { method: "POST", body: input }, decodeAccountAdminJob),
+    onProgress,
+    signal,
+  );
 }
 
 export function importAccounts(files: readonly File[], onProgress?: (value: AccountTaskProgressDTO) => void, signal?: AbortSignal): Promise<AccountImportResultDTO> {
@@ -451,8 +543,12 @@ export function updateAccountsEnabled(ids: string[], enabled: boolean, provider:
   return apiRequest("/api/admin/v1/accounts/batch", { method: "PATCH", body: { ids, enabled, provider } }, decodeCountResult<{ updated: number }>("updated"));
 }
 
-export function refreshAccountsQuota(ids: string[], provider: AccountProvider): Promise<{ succeeded: number; failed: number }> {
-  return apiRequest("/api/admin/v1/accounts/batch/refresh-quotas", { method: "POST", body: { ids, provider } }, createObjectDecoder("account batch", { succeeded: isNumber, failed: isNumber }));
+export function refreshAccountsQuota(ids: string[], provider: AccountProvider, onProgress?: (value: AccountTaskProgressDTO) => void, signal?: AbortSignal): Promise<{ succeeded: number; failed: number }> {
+  return waitForAccountAdminJob(
+    apiRequest("/api/admin/v1/accounts/batch/refresh-quotas", { method: "POST", body: { ids, provider } }, decodeAccountAdminJob),
+    onProgress,
+    signal,
+  );
 }
 
 export function refreshAccountsTokens(ids: string[], provider: AccountProvider): Promise<AccountTokenRefreshResultDTO> {

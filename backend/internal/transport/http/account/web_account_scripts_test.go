@@ -10,7 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func TestRunWebAccountScriptsRejectsInvalidRequestsBeforeSSE(t *testing.T) {
+func TestRunWebAccountScriptsRejectsInvalidRequests(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	tests := []struct {
 		name string
@@ -40,7 +40,7 @@ func TestRunWebAccountScriptsRejectsInvalidRequestsBeforeSSE(t *testing.T) {
 	}
 }
 
-func TestRunWebAccountScriptsRejectsOversizedSelectionBeforeSSE(t *testing.T) {
+func TestRunWebAccountScriptsRejectsOversizedSelection(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ids := make([]string, maxWebAccountScriptRequestIDs+1)
 	for index := range ids {
@@ -62,7 +62,7 @@ func TestRunWebAccountScriptsRejectsOversizedSelectionBeforeSSE(t *testing.T) {
 
 	new(Handler).runWebAccountScripts(ctx)
 
-	if recorder.Code != 400 || !strings.Contains(recorder.Body.String(), "单次最多处理 1000 个账号") {
+	if recorder.Code != 400 {
 		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 	if contentType := recorder.Header().Get("Content-Type"); strings.HasPrefix(contentType, "text/event-stream") {

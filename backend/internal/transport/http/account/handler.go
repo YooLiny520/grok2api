@@ -132,6 +132,9 @@ func (p *accountSyncPipeline) reportProgress() {
 func (h *Handler) Register(router *gin.RouterGroup) {
 	router.GET("/accounts", h.list)
 	router.GET("/accounts/summary", h.summary)
+	router.GET("/accounts/jobs", h.listAdminJobs)
+	router.GET("/accounts/jobs/:id", h.getAdminJob)
+	router.POST("/accounts/jobs/:id/cancel", h.cancelAdminJob)
 	router.GET("/accounts/export", h.exportCredentials)
 	router.GET("/accounts/:id", h.get)
 	router.POST("/accounts/device/start", h.startDevice)
@@ -504,17 +507,12 @@ func (h *Handler) batchRefreshQuotas(c *gin.Context) {
 	if !h.validateProviderIDs(c, ids, request.Provider) {
 		return
 	}
-	var succeeded, failed int
-	if providerValue == accountdomain.ProviderBuild {
-		succeeded, failed, err = h.service.BatchRefreshBilling(c.Request.Context(), ids)
-	} else {
-		succeeded, failed, err = h.service.BatchRefreshQuota(c.Request.Context(), ids)
-	}
+	job, err := h.service.StartBatchQuotaSyncJob(ids, request.Provider)
 	if err != nil {
-		h.writeServiceError(c, "quotaBatchRefreshFailed", err, http.StatusBadGateway, "批量同步账号额度失败")
+		h.writeServiceError(c, "quotaBatchRefreshFailed", err, http.StatusConflict, "启动批量额度同步失败")
 		return
 	}
-	response.Success(c, http.StatusOK, gin.H{"succeeded": succeeded, "failed": failed})
+	response.Success(c, http.StatusAccepted, newAdminJobResponse(job))
 }
 
 func (h *Handler) batchRefreshTokens(c *gin.Context) {
@@ -1021,6 +1019,10 @@ func (h *Handler) writeServiceError(c *gin.Context, code string, err error, fall
 		response.Error(c, http.StatusConflict, "accountOperationUnsupported", err.Error())
 	case errors.Is(err, accountapp.ErrConversionBusy):
 		response.Error(c, http.StatusConflict, "accountConversionBusy", err.Error())
+	case errors.Is(err, accountapp.ErrAdminJobBusy):
+		response.Error(c, http.StatusConflict, "adminJobBusy", err.Error())
+	case errors.Is(err, accountapp.ErrAdminJobNotFound):
+		response.Error(c, http.StatusNotFound, "adminJobNotFound", err.Error())
 	case errors.Is(err, accountapp.ErrWebAccountScriptBusy):
 		response.Error(c, http.StatusConflict, "webAccountScriptBusy", err.Error())
 	default:
@@ -1091,14 +1093,12 @@ func (h *Handler) refreshBilling(c *gin.Context) {
 }
 
 func (h *Handler) refreshAllBilling(c *gin.Context) {
-	stream := newAccountEventStream(c)
-	defer stream.Close()
-	succeeded, failed, err := h.service.SyncAllBillingWithProgress(c.Request.Context(), stream.ProgressObserver())
+	job, err := h.service.StartBillingSyncJob()
 	if err != nil {
-		stream.WriteError("billingRefreshFailed", "刷新账号额度失败")
+		h.writeServiceError(c, "billingRefreshFailed", err, http.StatusConflict, "启动 Billing 同步失败")
 		return
 	}
-	_ = stream.Write("complete", accountBatchResponse{Succeeded: succeeded, Failed: failed})
+	response.Success(c, http.StatusAccepted, newAdminJobResponse(job))
 }
 
 func (h *Handler) refreshAllTokens(c *gin.Context) {
@@ -1113,25 +1113,21 @@ func (h *Handler) refreshAllTokens(c *gin.Context) {
 }
 
 func (h *Handler) refreshAllWebQuotas(c *gin.Context) {
-	stream := newAccountEventStream(c)
-	defer stream.Close()
-	succeeded, failed, err := h.service.SyncAllWebQuotasWithProgress(c.Request.Context(), stream.ProgressObserver())
+	job, err := h.service.StartWebQuotaSyncJob()
 	if err != nil {
-		stream.WriteError("quotaRefreshFailed", "同步 Grok Web 账号额度失败")
+		h.writeServiceError(c, "quotaRefreshFailed", err, http.StatusConflict, "启动 Grok Web 额度同步失败")
 		return
 	}
-	_ = stream.Write("complete", accountBatchResponse{Succeeded: succeeded, Failed: failed})
+	response.Success(c, http.StatusAccepted, newAdminJobResponse(job))
 }
 
 func (h *Handler) refreshAllConsoleQuotas(c *gin.Context) {
-	stream := newAccountEventStream(c)
-	defer stream.Close()
-	succeeded, failed, err := h.service.SyncAllConsoleQuotasWithProgress(c.Request.Context(), stream.ProgressObserver())
+	job, err := h.service.StartConsoleQuotaSyncJob()
 	if err != nil {
-		stream.WriteError("quotaRefreshFailed", "同步 Grok Console 账号额度失败")
+		h.writeServiceError(c, "quotaRefreshFailed", err, http.StatusConflict, "启动 Grok Console 额度同步失败")
 		return
 	}
-	_ = stream.Write("complete", accountBatchResponse{Succeeded: succeeded, Failed: failed})
+	response.Success(c, http.StatusAccepted, newAdminJobResponse(job))
 }
 
 func newAccountResponse(value accountapp.View) accountResponse {
@@ -1241,4 +1237,75 @@ func (h *Handler) validateProviderIDs(c *gin.Context, ids []uint64, providerValu
 		return false
 	}
 	return true
+}
+
+func (h *Handler) listAdminJobs(c *gin.Context) {
+	jobs := h.service.ListAdminJobs()
+	items := make([]adminJobResponse, 0, len(jobs))
+	for _, job := range jobs {
+		items = append(items, newAdminJobResponse(job))
+	}
+	response.Success(c, http.StatusOK, gin.H{"items": items})
+}
+
+func (h *Handler) getAdminJob(c *gin.Context) {
+	id := c.Param("id")
+	if id == "" {
+		response.Error(c, http.StatusBadRequest, "invalidId", "任务 ID 无效")
+		return
+	}
+	job, err := h.service.GetAdminJob(id)
+	if err != nil {
+		h.writeServiceError(c, "adminJobGetFailed", err, http.StatusNotFound, "读取后台任务失败")
+		return
+	}
+	response.Success(c, http.StatusOK, newAdminJobResponse(job))
+}
+
+func (h *Handler) cancelAdminJob(c *gin.Context) {
+	id := c.Param("id")
+	if id == "" {
+		response.Error(c, http.StatusBadRequest, "invalidId", "任务 ID 无效")
+		return
+	}
+	job, err := h.service.CancelAdminJob(id)
+	if err != nil {
+		h.writeServiceError(c, "adminJobCancelFailed", err, http.StatusNotFound, "取消后台任务失败")
+		return
+	}
+	response.Success(c, http.StatusOK, newAdminJobResponse(job))
+}
+
+type adminJobResponse struct {
+	ID         string  `json:"id"`
+	Kind       string  `json:"kind"`
+	Status     string  `json:"status"`
+	Completed  int     `json:"completed"`
+	Total      int     `json:"total"`
+	Succeeded  int     `json:"succeeded"`
+	Failed     int     `json:"failed"`
+	Message    string  `json:"message,omitempty"`
+	Error      string  `json:"error,omitempty"`
+	StartedAt  string  `json:"startedAt"`
+	FinishedAt *string `json:"finishedAt,omitempty"`
+}
+
+func newAdminJobResponse(job accountapp.AdminJobView) adminJobResponse {
+	result := adminJobResponse{
+		ID:        job.ID,
+		Kind:      string(job.Kind),
+		Status:    string(job.Status),
+		Completed: job.Completed,
+		Total:     job.Total,
+		Succeeded: job.Succeeded,
+		Failed:    job.Failed,
+		Message:   job.Message,
+		Error:     job.Error,
+		StartedAt: job.StartedAt.UTC().Format(time.RFC3339Nano),
+	}
+	if job.FinishedAt != nil {
+		value := job.FinishedAt.UTC().Format(time.RFC3339Nano)
+		result.FinishedAt = &value
+	}
+	return result
 }
