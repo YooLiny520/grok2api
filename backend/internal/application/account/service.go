@@ -21,21 +21,21 @@ import (
 )
 
 var (
-	ErrDevicePending  = errors.New("Device OAuth 绛夊緟鐢ㄦ埛鎺堟潈")
-	ErrDeviceSlowDown = errors.New("Device OAuth 杞杩囧揩")
-	ErrDeviceDenied   = errors.New("Device OAuth 宸叉嫆缁濇垨杩囨湡")
-	ErrInvalidFilter  = errors.New("璐﹀彿绛涢€夋潯浠舵棤鏁?)
-	ErrInvalidInput   = errors.New("璐﹀彿鍙傛暟鏃犳晥")
-	ErrInvalidImport  = errors.New("璐﹀彿鍑嵁鏍煎紡鏃犳晥")
-	ErrImportLimit    = errors.New("瀵煎叆璐﹀彿鏁伴噺瓒呰繃闄愬埗")
-	ErrExportLimit    = errors.New("瀵煎嚭璐﹀彿鏁伴噺瓒呰繃闄愬埗")
-	ErrNotFound       = errors.New("璐﹀彿涓嶅瓨鍦?)
-	ErrUnsupported    = errors.New("璐﹀彿鏉ユ簮涓嶆敮鎸佽鎿嶄綔")
-	ErrConversionBusy = errors.New("璐﹀彿姝ｅ湪杞崲涓?Grok Build")
-	ErrConflict       = errors.New("璐﹀彿鎿嶄綔瀛樺湪鍐茬獊")
+	ErrDevicePending  = errors.New("Device OAuth 等待用户授权")
+	ErrDeviceSlowDown = errors.New("Device OAuth 轮询过快")
+	ErrDeviceDenied   = errors.New("Device OAuth 已拒绝或过期")
+	ErrInvalidFilter  = errors.New("账号筛选条件无效")
+	ErrInvalidInput   = errors.New("账号参数无效")
+	ErrInvalidImport  = errors.New("账号凭据格式无效")
+	ErrImportLimit    = errors.New("导入账号数量超过限制")
+	ErrExportLimit    = errors.New("导出账号数量超过限制")
+	ErrNotFound       = errors.New("账号不存在")
+	ErrUnsupported    = errors.New("账号来源不支持该操作")
+	ErrConversionBusy = errors.New("账号正在转换为 Grok Build")
+	ErrConflict       = errors.New("账号操作存在冲突")
 )
 
-var ErrCredentialRefreshPermanent = errors.New("OAuth refresh token 宸叉案涔呭け鏁?)
+var ErrCredentialRefreshPermanent = errors.New("OAuth refresh token 已永久失效")
 
 const (
 	estimatedFreeTokenLimit     int64         = 1_000_000
@@ -64,7 +64,7 @@ const (
 	buildBotFlagCacheTTL        time.Duration = 30 * time.Second
 )
 
-const permanentRefreshExpiredReason = "OAuth refresh token 宸叉案涔呭け鏁堜笖 access token 宸茶繃鏈?
+const permanentRefreshExpiredReason = "OAuth refresh token 已永久失效且 access token 已过期"
 const buildBotFlagCacheKey = "build-bot-flagged-account-ids"
 
 type webQuotaRefreshState struct {
@@ -126,9 +126,9 @@ type UpdateInput struct {
 	MinimumRemaining       *float64
 	CloudflareCookies      *string
 	ClearCloudflareCookies bool
-	// BuildSuperEntitled 浠?grok_build 鍙缃紱闈?Build 杩斿洖涓氬姟閿欒銆?
+	// BuildSuperEntitled 仅 grok_build 可设置；非 Build 返回业务错误。
 	BuildSuperEntitled *bool
-	// BuildRouteMode 浠?grok_build 鍙缃紱nil 琛ㄧず涓嶄慨鏀广€?
+	// BuildRouteMode 仅 grok_build 可设置；nil 表示不修改。
 	BuildRouteMode *accountdomain.BuildRouteMode
 }
 
@@ -172,7 +172,7 @@ const (
 
 type ImportedAccountObserver func(accountID uint64) error
 
-// BatchProgressObserver 鍦ㄥ崟涓处鍙蜂换鍔＄粨鏉熷悗鎶ュ憡鎵规瀹屾垚鏁般€?
+// BatchProgressObserver 在单个账号任务结束后报告批次完成数。
 type BatchProgressObserver func(completed, total int) error
 
 type ExportResult struct {
@@ -253,7 +253,7 @@ func (s *Service) Summary(ctx context.Context) (Summary, error) {
 	return result, nil
 }
 
-// Service 璐熻矗 OAuth 璐﹀彿鎺ュ叆銆佸埛鏂般€侀搴﹀拰鎸佷箙鍖栫敓鍛藉懆鏈熴€?
+// Service 负责 OAuth 账号接入、刷新、额度和持久化生命周期。
 type Service struct {
 	accounts              repository.AccountRepository
 	audits                repository.AuditRepository
@@ -291,7 +291,7 @@ func (s *Service) SetQuotaRecoveryQueue(queue repository.QuotaRecoveryQueue) {
 	s.quotaQueue = queue
 }
 
-// SetConcurrencyLimiter 璁╄处鍙风淮鎶や换鍔¤鍙栦笌鎺ㄧ悊璺敱鐩稿悓鐨勬椿鍔ㄧ绾︺€?
+// SetConcurrencyLimiter 让账号维护任务读取与推理路由相同的活动租约。
 func (s *Service) SetConcurrencyLimiter(value repository.ConcurrencyLimiter) {
 	s.concurrency = value
 }
@@ -320,7 +320,7 @@ func (s *Service) SetBulkPool(pool *batch.Pool) {
 	}
 }
 
-// SetTaskPools 涓鸿浆鎹€佸悓姝ュ拰鍑嵁鍒锋柊缁戝畾鐙珛鍒嗙被骞跺彂姹犮€?
+// SetTaskPools 为转换、同步和凭据刷新绑定独立分类并发池。
 func (s *Service) SetTaskPools(conversion, syncPool, refresh *batch.Pool) {
 	if conversion != nil {
 		s.conversionPool = conversion
@@ -339,7 +339,7 @@ func (s *Service) SetLogger(logger *slog.Logger) {
 	}
 }
 
-// ProviderDefinition 鍚戣处鍙峰悓姝ョ紪鎺掑眰鏆撮湶鍙鐢熷懡鍛ㄦ湡绛栫暐锛屼笉娉勯湶鍏蜂綋 Adapter銆?
+// ProviderDefinition 向账号同步编排层暴露只读生命周期策略，不泄露具体 Adapter。
 func (s *Service) ProviderDefinition(value accountdomain.Provider) (provider.Definition, bool) {
 	if s.providers == nil {
 		return provider.Definition{}, false
@@ -460,20 +460,20 @@ func oneOf(value string, allowed ...string) bool {
 	return false
 }
 
-// BatchUpdate 瀵逛竴缁勮处鍙峰簲鐢ㄥ悓涓€缁勮矾鐢卞弬鏁帮紝鍗曟鏈€澶氬鐞嗕竴涓鐞嗙鏈€澶у垎椤点€?
+// BatchUpdate 对一组账号应用同一组路由参数，单次最多处理一个管理端最大分页。
 func (s *Service) BatchUpdate(ctx context.Context, ids []uint64, input UpdateInput) (int64, error) {
 	ids, err := normalizeBatchIDs(ids)
 	if err != nil {
 		return 0, err
 	}
 	if input.MaxConcurrent != nil && (*input.MaxConcurrent < 1 || *input.MaxConcurrent > accountdomain.MaxConcurrent) {
-		return 0, invalidInput("maxConcurrent 蹇呴』鍦?1 鍒?256 涔嬮棿")
+		return 0, invalidInput("maxConcurrent 必须在 1 到 256 之间")
 	}
 	if input.MinimumRemaining != nil && *input.MinimumRemaining < 0 {
-		return 0, invalidInput("minimumRemaining 涓嶈兘灏忎簬闆?)
+		return 0, invalidInput("minimumRemaining 不能小于零")
 	}
 	if input.Name != nil {
-		return 0, invalidInput("鎵归噺鏇存柊涓嶆敮鎸佷慨鏀硅处鍙峰悕绉?)
+		return 0, invalidInput("批量更新不支持修改账号名称")
 	}
 	updated, err := s.accounts.UpdateMany(ctx, ids, repository.AccountUpdates{Enabled: input.Enabled, Priority: input.Priority, MaxConcurrent: input.MaxConcurrent, MinimumRemaining: input.MinimumRemaining})
 	if err != nil {
@@ -487,7 +487,7 @@ func (s *Service) BatchUpdate(ctx context.Context, ids []uint64, input UpdateInp
 	return updated, nil
 }
 
-// BatchDelete 鍘熷瓙鍒犻櫎涓€缁勮处鍙峰強鍏堕搴︾姸鎬併€?
+// BatchDelete 原子删除一组账号及其额度状态。
 func (s *Service) BatchDelete(ctx context.Context, ids []uint64) (int64, error) {
 	ids, err := normalizeBatchIDs(ids)
 	if err != nil {
@@ -504,11 +504,11 @@ func (s *Service) BatchDelete(ctx context.Context, ids []uint64) (int64, error) 
 	return deleted, mapRepositoryError(err)
 }
 
-// AccountsBelongToProvider 鏍￠獙鎵归噺璐﹀彿鏄惁鍏ㄩ儴灞炰簬鎸囧畾鍙锋睜銆?
-// 璇ユ牎楠屽彧璇诲彇璐﹀彿涓昏〃锛岄伩鍏嶈鎯呴〉鐨勯搴︺€佸璁℃垨鍏宠仈鏌ヨ褰卞搷鎵归噺鎿嶄綔銆?
+// AccountsBelongToProvider 校验批量账号是否全部属于指定号池。
+// 该校验只读取账号主表，避免详情页的额度、审计或关联查询影响批量操作。
 func (s *Service) AccountsBelongToProvider(ctx context.Context, ids []uint64, providerValue accountdomain.Provider) (bool, error) {
 	if !providerValue.IsValid() {
-		return false, invalidInput("璐﹀彿鏉ユ簮鏃犳晥")
+		return false, invalidInput("账号来源无效")
 	}
 	values, err := normalizeBatchIDs(ids)
 	if err != nil {
@@ -521,10 +521,10 @@ func (s *Service) AccountsBelongToProvider(ctx context.Context, ids []uint64, pr
 	return count == int64(len(values)), nil
 }
 
-// CleanupAccounts 鎸夌鐞嗙鐘舵€佹竻鐞嗘寚瀹?Provider 璐﹀彿锛涙甯搞€佸緟閲嶇疆鍜屾娴嬩腑鐨勮处鍙蜂笉鍦ㄦ竻鐞嗚寖鍥村唴銆?
+// CleanupAccounts 按管理端状态清理指定 Provider 账号；正常、待重置和检测中的账号不在清理范围内。
 func (s *Service) CleanupAccounts(ctx context.Context, providerValue accountdomain.Provider, statuses []CleanupStatus) (int64, error) {
 	if !providerValue.IsValid() {
-		return 0, invalidInput("璐﹀彿鏉ユ簮鏃犳晥")
+		return 0, invalidInput("账号来源无效")
 	}
 	selected := make(map[CleanupStatus]struct{}, len(statuses))
 	for _, status := range statuses {
@@ -532,11 +532,11 @@ func (s *Service) CleanupAccounts(ctx context.Context, providerValue accountdoma
 		case CleanupStatusCooldown, CleanupStatusDisabled, CleanupStatusReauthRequired:
 			selected[status] = struct{}{}
 		default:
-			return 0, invalidInput("璐﹀彿娓呯悊鐘舵€佹棤鏁?)
+			return 0, invalidInput("账号清理状态无效")
 		}
 	}
 	if len(selected) == 0 {
-		return 0, invalidInput("鑷冲皯閫夋嫨涓€绉嶈处鍙风姸鎬?)
+		return 0, invalidInput("至少选择一种账号状态")
 	}
 
 	const cleanupBatchSize = 500
@@ -616,7 +616,7 @@ func (s *Service) ObserveResponseModel(ctx context.Context, id uint64, model str
 }
 
 func newQuotaView(billing *accountdomain.Billing, observedTokens int64, recovery *accountdomain.QuotaRecovery, observedModel string, buildSuperEntitled bool) QuotaView {
-	// Billing paid 浼樺厛锛氫繚鐣欑湡瀹為搴︽暟鍊笺€?
+	// Billing paid 优先：保留真实额度数值。
 	if billing != nil && billing.IsPaid() {
 		periodStart, periodEnd := billing.BillingPeriodStart, billing.BillingPeriodEnd
 		if billing.UsagePeriodType != "" {
@@ -661,8 +661,8 @@ func newQuotaView(billing *accountdomain.Billing, observedTokens int64, recovery
 		}
 		return result
 	}
-	// 绠＄悊鍛樼‘璁ょ殑 Build Super entitlement锛氳鐩?Free recovery / profile / observed free 绛夊急淇″彿銆?
-	// 涓嶄吉閫犻搴︺€佷綑棰濄€佷娇鐢ㄧ巼鎴栬处鏈燂紱Billing 鏁板€间繚鎸佹湭鐭?闆躲€?
+	// 管理员确认的 Build Super entitlement：覆盖 Free recovery / profile / observed free 等弱信号。
+	// 不伪造额度、余额、使用率或账期；Billing 数值保持未知/零。
 	if buildSuperEntitled {
 		return QuotaView{
 			Type: QuotaTypePaid, Source: "buildSuperEntitlement", Confidence: "confirmed",
@@ -734,11 +734,11 @@ func isEstimatedFreeBillingProfile(billing *accountdomain.Billing) bool {
 	return billing != nil && billing.HasFreeProfileSignal()
 }
 
-// StartDeviceLogin 鍚姩鐭湡 Device OAuth锛屼細璇濆彧淇濆瓨鍦ㄦ湁鐣岃繍琛屾€佸瓨鍌ㄤ腑銆?
+// StartDeviceLogin 启动短期 Device OAuth，会话只保存在有界运行态存储中。
 func (s *Service) StartDeviceLogin(ctx context.Context) (DeviceStartResult, error) {
 	adapter, ok := s.providers.DeviceOAuth(accountdomain.ProviderBuild)
 	if !ok {
-		return DeviceStartResult{}, fmt.Errorf("CLI Provider 鏈敞鍐?)
+		return DeviceStartResult{}, fmt.Errorf("CLI Provider 未注册")
 	}
 	authorization, err := adapter.StartDeviceAuthorization(ctx)
 	if err != nil {
@@ -756,7 +756,7 @@ func (s *Service) StartDeviceLogin(ctx context.Context) (DeviceStartResult, erro
 	return DeviceStartResult{SessionID: sessionID, UserCode: session.UserCode, VerificationURI: session.VerificationURI, VerificationURIComplete: session.VerificationURIComplete, Interval: session.Interval, ExpiresAt: session.ExpiresAt}, nil
 }
 
-// PollDeviceLogin 鎵ц涓€娆′笂娓歌疆璇紝鎴愬姛鍚庣珛鍗冲姞瀵嗗苟鍐欏叆璐﹀彿浠撳偍銆?
+// PollDeviceLogin 执行一次上游轮询，成功后立即加密并写入账号仓储。
 func (s *Service) PollDeviceLogin(ctx context.Context, sessionID string) (View, error) {
 	now := time.Now().UTC()
 	session, err := s.deviceSessions.Get(ctx, sessionID, now)
@@ -768,7 +768,7 @@ func (s *Service) PollDeviceLogin(ctx context.Context, sessionID string) (View, 
 	}
 	adapter, ok := s.providers.DeviceOAuth(accountdomain.ProviderBuild)
 	if !ok {
-		return View{}, fmt.Errorf("CLI Provider 鏈敞鍐?)
+		return View{}, fmt.Errorf("CLI Provider 未注册")
 	}
 	seed, err := adapter.PollDeviceAuthorization(ctx, session.DeviceCode)
 	session.NextPollAt = now.Add(session.Interval)
@@ -798,7 +798,7 @@ func (s *Service) PollDeviceLogin(ctx context.Context, sessionID string) (View, 
 	return s.Get(ctx, value.ID)
 }
 
-// ImportCredentials 瀵煎叆鐢ㄦ埛涓婁紶鐨?OAuth 璐﹀彿鍑嵁銆?
+// ImportCredentials 导入用户上传的 OAuth 账号凭据。
 func (s *Service) ImportCredentials(ctx context.Context, data []byte) (ImportResult, error) {
 	return s.ImportCredentialsWithObserver(ctx, data, nil)
 }
@@ -807,21 +807,21 @@ func (s *Service) ImportCredentialsWithObserver(ctx context.Context, data []byte
 	return s.ImportCredentialsWithProgress(ctx, data, observer, nil)
 }
 
-// ImportCredentialsWithProgress 瀵煎叆 Build 鍑嵁骞舵姤鍛婂凡鍐欏叆娴佹按绾跨殑璐﹀彿鏁般€?
+// ImportCredentialsWithProgress 导入 Build 凭据并报告已写入流水线的账号数。
 func (s *Service) ImportCredentialsWithProgress(ctx context.Context, data []byte, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	return s.ImportCredentialDocumentsWithProgress(ctx, [][]byte{data}, observer, progress)
 }
 
-// ImportCredentialDocumentsWithProgress 鍚堝苟瑙ｆ瀽澶氫釜 Build 鍑嵁鏂囦欢锛屽苟浣滀负涓€涓壒娆″啓鍏ュ拰鍚屾銆?
+// ImportCredentialDocumentsWithProgress 合并解析多个 Build 凭据文件，并作为一个批次写入和同步。
 func (s *Service) ImportCredentialDocumentsWithProgress(ctx context.Context, documents [][]byte, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	adapter, ok := s.providers.CredentialCodec(accountdomain.ProviderBuild)
 	if !ok {
-		return ImportResult{}, fmt.Errorf("CLI Provider 鏈敞鍐?)
+		return ImportResult{}, fmt.Errorf("CLI Provider 未注册")
 	}
 	return s.importCredentialDocumentsWithProgress(ctx, adapter, documents, observer, progress)
 }
 
-// ImportWebCredentials 瀵煎叆鐗堟湰鍖栨垨鏃у彿姹犳牸寮忕殑 Grok Web SSO 鍑嵁銆?
+// ImportWebCredentials 导入版本化或旧号池格式的 Grok Web SSO 凭据。
 func (s *Service) ImportWebCredentials(ctx context.Context, data []byte) (ImportResult, error) {
 	return s.ImportWebCredentialsWithObserver(ctx, data, nil)
 }
@@ -830,16 +830,16 @@ func (s *Service) ImportWebCredentialsWithObserver(ctx context.Context, data []b
 	return s.ImportWebCredentialsWithProgress(ctx, data, observer, nil)
 }
 
-// ImportWebCredentialsWithProgress 瀵煎叆 Web 鍑嵁骞舵姤鍛婂凡鍐欏叆娴佹按绾跨殑璐﹀彿鏁般€?
+// ImportWebCredentialsWithProgress 导入 Web 凭据并报告已写入流水线的账号数。
 func (s *Service) ImportWebCredentialsWithProgress(ctx context.Context, data []byte, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	return s.ImportWebCredentialDocumentsWithProgress(ctx, [][]byte{data}, observer, progress)
 }
 
-// ImportWebCredentialDocumentsWithProgress 鍚堝苟瑙ｆ瀽澶氫釜 Web JSON 鎴?SSO 鏂囨湰鏂囦欢锛屽苟浣滀负涓€涓壒娆″啓鍏ュ拰鍚屾銆?
+// ImportWebCredentialDocumentsWithProgress 合并解析多个 Web JSON 或 SSO 文本文件，并作为一个批次写入和同步。
 func (s *Service) ImportWebCredentialDocumentsWithProgress(ctx context.Context, documents [][]byte, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	adapter, ok := s.providers.CredentialCodec(accountdomain.ProviderWeb)
 	if !ok {
-		return ImportResult{}, fmt.Errorf("Grok Web Provider 鏈敞鍐?)
+		return ImportResult{}, fmt.Errorf("Grok Web Provider 未注册")
 	}
 	return s.importCredentialDocumentsWithProgress(ctx, adapter, documents, observer, progress)
 }
@@ -859,14 +859,14 @@ func (s *Service) ImportConsoleCredentialsWithProgress(ctx context.Context, data
 func (s *Service) ImportConsoleCredentialDocumentsWithProgress(ctx context.Context, documents [][]byte, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	adapter, ok := s.providers.CredentialCodec(accountdomain.ProviderConsole)
 	if !ok {
-		return ImportResult{}, fmt.Errorf("Grok Console Provider 鏈敞鍐?)
+		return ImportResult{}, fmt.Errorf("Grok Console Provider 未注册")
 	}
 	return s.importCredentialDocumentsWithProgress(ctx, adapter, documents, observer, progress)
 }
 
 func (s *Service) importCredentialDocumentsWithProgress(ctx context.Context, adapter provider.CredentialCodecAdapter, documents [][]byte, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	if len(documents) == 0 {
-		return ImportResult{}, fmt.Errorf("%w: 娌℃湁鍙鍏ョ殑璐﹀彿鏂囦欢", ErrInvalidImport)
+		return ImportResult{}, fmt.Errorf("%w: 没有可导入的账号文件", ErrInvalidImport)
 	}
 	seeds := make([]provider.CredentialSeed, 0)
 	seen := make(map[string]struct{})
@@ -875,13 +875,13 @@ func (s *Service) importCredentialDocumentsWithProgress(ctx context.Context, ada
 		values, err := adapter.ParseImportedCredentials(document)
 		if err != nil {
 			if errors.Is(err, provider.ErrCredentialLimit) {
-				return ImportResult{}, fmt.Errorf("%w: 鍗曟鏈€澶氬鍏?%d 涓处鍙?, ErrImportLimit, maxCredentialImportAccounts)
+				return ImportResult{}, fmt.Errorf("%w: 单次最多导入 %d 个账号", ErrImportLimit, maxCredentialImportAccounts)
 			}
-			return ImportResult{}, fmt.Errorf("%w: 绗?%d 涓枃浠? %v", ErrInvalidImport, index+1, err)
+			return ImportResult{}, fmt.Errorf("%w: 第 %d 个文件: %v", ErrInvalidImport, index+1, err)
 		}
 		parsedAccounts += len(values)
 		if parsedAccounts > maxCredentialImportAccounts {
-			return ImportResult{}, fmt.Errorf("%w: 鍗曟鏈€澶氬鍏?%d 涓处鍙?, ErrImportLimit, maxCredentialImportAccounts)
+			return ImportResult{}, fmt.Errorf("%w: 单次最多导入 %d 个账号", ErrImportLimit, maxCredentialImportAccounts)
 		}
 		for _, value := range values {
 			if value.SourceKey != "" {
@@ -944,14 +944,14 @@ func (s *Service) persistImportedSeeds(ctx context.Context, seeds []provider.Cre
 	return result, nil
 }
 
-// SyncWebAccountsToConsoleWithProgress 浣跨敤 Web 璐﹀彿鐨勫悓涓€浠?SSO 鍒涘缓鎴栨洿鏂?Console 璐﹀彿銆?
+// SyncWebAccountsToConsoleWithProgress 使用 Web 账号的同一份 SSO 创建或更新 Console 账号。
 func (s *Service) SyncWebAccountsToConsoleWithProgress(ctx context.Context, ids []uint64, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	return s.SyncWebAccountsToConsoleWithStrategy(ctx, ids, WebConsoleSyncAll, observer, progress)
 }
 
 func (s *Service) SyncWebAccountsToConsoleWithStrategy(ctx context.Context, ids []uint64, strategy WebConsoleSyncStrategy, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	if strategy != WebConsoleSyncAll && strategy != WebConsoleSyncMissing {
-		return ImportResult{}, invalidInput("Grok Web 鍒?Console 鍚屾绛栫暐鏃犳晥")
+		return ImportResult{}, invalidInput("Grok Web 到 Console 同步策略无效")
 	}
 	ids, err := normalizeIDs(ids, maxWebConsoleSyncAccounts)
 	if err != nil {
@@ -977,14 +977,14 @@ func (s *Service) SyncWebAccountsToConsoleWithStrategy(ctx context.Context, ids 
 	return s.syncWebCredentialsToConsole(ctx, values, observer, progress)
 }
 
-// SyncAllWebAccountsToConsoleWithProgress 鍚屾瀹屾暣 Web 鍙锋睜锛岄伩鍏嶅墠绔垎椤甸仐婕忚处鍙枫€?
+// SyncAllWebAccountsToConsoleWithProgress 同步完整 Web 号池，避免前端分页遗漏账号。
 func (s *Service) SyncAllWebAccountsToConsoleWithProgress(ctx context.Context, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	return s.SyncAllWebAccountsToConsoleWithStrategy(ctx, WebConsoleSyncAll, observer, progress)
 }
 
 func (s *Service) SyncAllWebAccountsToConsoleWithStrategy(ctx context.Context, strategy WebConsoleSyncStrategy, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	if strategy != WebConsoleSyncAll && strategy != WebConsoleSyncMissing {
-		return ImportResult{}, invalidInput("Grok Web 鍒?Console 鍚屾绛栫暐鏃犳晥")
+		return ImportResult{}, invalidInput("Grok Web 到 Console 同步策略无效")
 	}
 	batchSize := accountTaskBatchSize
 	result := ImportResult{AccountIDs: make([]uint64, 0)}
@@ -1038,23 +1038,23 @@ func (s *Service) SyncAllWebAccountsToConsoleWithStrategy(ctx context.Context, s
 func (s *Service) syncWebCredentialsToConsole(ctx context.Context, values []accountdomain.Credential, observer ImportedAccountObserver, progress BatchProgressObserver) (ImportResult, error) {
 	adapter, ok := s.providers.CredentialCodec(accountdomain.ProviderConsole)
 	if !ok {
-		return ImportResult{}, fmt.Errorf("Grok Console Provider 鏈敞鍐?)
+		return ImportResult{}, fmt.Errorf("Grok Console Provider 未注册")
 	}
 	seeds := make([]provider.CredentialSeed, 0, len(values))
 	for _, value := range values {
 		if value.Provider != accountdomain.ProviderWeb || value.AuthType != accountdomain.AuthTypeSSO {
-			return ImportResult{}, fmt.Errorf("%w: 浠?Grok Web SSO 璐﹀彿鏀寔鍚屾鍒?Console", ErrUnsupported)
+			return ImportResult{}, fmt.Errorf("%w: 仅 Grok Web SSO 账号支持同步到 Console", ErrUnsupported)
 		}
 		token, err := s.cipher.Decrypt(value.EncryptedAccessToken)
 		if err != nil {
-			return ImportResult{}, fmt.Errorf("瑙ｅ瘑 Grok Web SSO: %w", err)
+			return ImportResult{}, fmt.Errorf("解密 Grok Web SSO: %w", err)
 		}
 		parsed, err := adapter.ParseImportedCredentials([]byte(token))
 		if err != nil {
-			return ImportResult{}, fmt.Errorf("鐢熸垚 Grok Console SSO 鍑嵁: %w", err)
+			return ImportResult{}, fmt.Errorf("生成 Grok Console SSO 凭据: %w", err)
 		}
 		if len(parsed) != 1 {
-			return ImportResult{}, fmt.Errorf("鐢熸垚 Grok Console SSO 鍑嵁: 棰勬湡 1 涓处鍙凤紝瀹為檯 %d 涓?, len(parsed))
+			return ImportResult{}, fmt.Errorf("生成 Grok Console SSO 凭据: 预期 1 个账号，实际 %d 个", len(parsed))
 		}
 		seed := parsed[0]
 		seed.Provider = accountdomain.ProviderConsole
@@ -1063,7 +1063,7 @@ func (s *Service) syncWebCredentialsToConsole(ctx context.Context, values []acco
 		if strings.TrimSpace(value.EncryptedCloudflareCookie) != "" {
 			cookies, decryptErr := s.cipher.Decrypt(value.EncryptedCloudflareCookie)
 			if decryptErr != nil {
-				return ImportResult{}, fmt.Errorf("瑙ｅ瘑 Grok Web Cloudflare Cookie: %w", decryptErr)
+				return ImportResult{}, fmt.Errorf("解密 Grok Web Cloudflare Cookie: %w", decryptErr)
 			}
 			seed.CloudflareCookies = cookies
 		}
@@ -1083,7 +1083,7 @@ func webConsoleAccountName(webName, fallback string) string {
 	return name
 }
 
-// ConvertWebAccountsToBuild 浣跨敤 Web SSO 鑷姩瀹屾垚 xAI Device Flow锛屽苟寤虹珛鍞竴鐨?Web/Build 璐﹀彿鍏宠仈銆?
+// ConvertWebAccountsToBuild 使用 Web SSO 自动完成 xAI Device Flow，并建立唯一的 Web/Build 账号关联。
 func (s *Service) ConvertWebAccountsToBuild(ctx context.Context, ids []uint64) (BuildConversionResult, error) {
 	return s.ConvertWebAccountsToBuildWithStrategy(ctx, ids, BuildConversionMissing, nil, nil)
 }
@@ -1092,14 +1092,14 @@ func (s *Service) ConvertWebAccountsToBuildWithObserver(ctx context.Context, ids
 	return s.ConvertWebAccountsToBuildWithStrategy(ctx, ids, BuildConversionMissing, observer, nil)
 }
 
-// ConvertWebAccountsToBuildWithProgress 杞崲鎸囧畾璐﹀彿锛屽苟鍚戣皟鐢ㄦ柟鎶ュ憡鐪熷疄瀹屾垚鏁般€?
+// ConvertWebAccountsToBuildWithProgress 转换指定账号，并向调用方报告真实完成数。
 func (s *Service) ConvertWebAccountsToBuildWithProgress(ctx context.Context, ids []uint64, observer ImportedAccountObserver, progress BatchProgressObserver) (BuildConversionResult, error) {
 	return s.ConvertWebAccountsToBuildWithStrategy(ctx, ids, BuildConversionMissing, observer, progress)
 }
 
 func (s *Service) ConvertWebAccountsToBuildWithStrategy(ctx context.Context, ids []uint64, strategy BuildConversionStrategy, observer ImportedAccountObserver, progress BatchProgressObserver) (BuildConversionResult, error) {
 	if strategy != BuildConversionAll && strategy != BuildConversionMissing {
-		return BuildConversionResult{}, invalidInput("Grok Web 鍒?Build 杞崲绛栫暐鏃犳晥")
+		return BuildConversionResult{}, invalidInput("Grok Web 到 Build 转换策略无效")
 	}
 	ids, err := normalizeIDs(ids, maxBuildConversionAccounts)
 	if err != nil {
@@ -1119,7 +1119,7 @@ func (s *Service) ConvertWebAccountsToBuildWithStrategy(ctx context.Context, ids
 	return result, err
 }
 
-// ConvertAllWebAccountsToBuild 杞崲鍏ㄩ儴灏氭湭寤虹珛 Build 鍏宠仈鐨?Grok Web 璐﹀彿銆?
+// ConvertAllWebAccountsToBuild 转换全部尚未建立 Build 关联的 Grok Web 账号。
 func (s *Service) ConvertAllWebAccountsToBuild(ctx context.Context) (BuildConversionResult, error) {
 	return s.ConvertAllWebAccountsToBuildWithStrategy(ctx, BuildConversionMissing, nil, nil)
 }
@@ -1128,14 +1128,14 @@ func (s *Service) ConvertAllWebAccountsToBuildWithObserver(ctx context.Context, 
 	return s.ConvertAllWebAccountsToBuildWithStrategy(ctx, BuildConversionMissing, observer, nil)
 }
 
-// ConvertAllWebAccountsToBuildWithProgress 杞崲瀹屾暣鏈叧鑱斿彿姹狅紝骞跺悜璋冪敤鏂规姤鍛婄湡瀹炲畬鎴愭暟銆?
+// ConvertAllWebAccountsToBuildWithProgress 转换完整未关联号池，并向调用方报告真实完成数。
 func (s *Service) ConvertAllWebAccountsToBuildWithProgress(ctx context.Context, observer ImportedAccountObserver, progress BatchProgressObserver) (BuildConversionResult, error) {
 	return s.ConvertAllWebAccountsToBuildWithStrategy(ctx, BuildConversionMissing, observer, progress)
 }
 
 func (s *Service) ConvertAllWebAccountsToBuildWithStrategy(ctx context.Context, strategy BuildConversionStrategy, observer ImportedAccountObserver, progress BatchProgressObserver) (BuildConversionResult, error) {
 	if strategy != BuildConversionAll && strategy != BuildConversionMissing {
-		return BuildConversionResult{}, invalidInput("Grok Web 鍒?Build 杞崲绛栫暐鏃犳晥")
+		return BuildConversionResult{}, invalidInput("Grok Web 到 Build 转换策略无效")
 	}
 	batchSize := accountTaskBatchSize
 	result := BuildConversionResult{BuildAccountIDs: make([]uint64, 0)}
@@ -1338,13 +1338,13 @@ func (s *Service) convertWebAccountToBuild(ctx context.Context, id uint64, strat
 			return 0, false, false, mapRepositoryError(getErr)
 		}
 		if linkedBuild.Provider != accountdomain.ProviderBuild || strings.TrimSpace(linkedBuild.SourceKey) == "" {
-			return 0, false, false, fmt.Errorf("宸插叧鑱?Grok Build 璐﹀彿韬唤鏃犳晥")
+			return 0, false, false, fmt.Errorf("已关联 Grok Build 账号身份无效")
 		}
 		linkedBuildSourceKey = linkedBuild.SourceKey
 	}
 	converter, ok := s.providers.BuildConverter(accountdomain.ProviderWeb)
 	if !ok {
-		return 0, false, false, fmt.Errorf("Grok Web SSO 杞崲鑳藉姏鏈敞鍐?)
+		return 0, false, false, fmt.Errorf("Grok Web SSO 转换能力未注册")
 	}
 	seed, err := converter.ConvertToBuild(ctx, value)
 	if err != nil {
@@ -1363,7 +1363,7 @@ func (s *Service) convertWebAccountToBuild(ctx context.Context, id uint64, strat
 		return 0, false, false, err
 	}
 	if value.LinkedAccountID != 0 && buildAccount.ID != value.LinkedAccountID {
-		return 0, false, false, fmt.Errorf("閲嶆柊杞崲鍚庣殑 Grok Build 璐﹀彿韬唤涓嶄竴鑷?)
+		return 0, false, false, fmt.Errorf("重新转换后的 Grok Build 账号身份不一致")
 	}
 	if err := s.accounts.LinkWebToBuild(ctx, id, buildAccount.ID); err != nil {
 		return 0, false, false, mapRepositoryError(err)
@@ -1371,22 +1371,22 @@ func (s *Service) convertWebAccountToBuild(ctx context.Context, id uint64, strat
 	return buildAccount.ID, created, false, nil
 }
 
-// ExportCredentials 淇濈暀 Grok Build 榛樿瀵煎嚭璇箟锛屼緵鏃ц皟鐢ㄦ柟鍏煎銆?
+// ExportCredentials 保留 Grok Build 默认导出语义，供旧调用方兼容。
 func (s *Service) ExportCredentials(ctx context.Context) (ExportResult, error) {
 	return s.ExportProviderCredentials(ctx, accountdomain.ProviderBuild)
 }
 
-// ExportProviderCredentials 瀵煎嚭鍙敱瀵瑰簲 Provider 瀵煎叆鎺ュ彛閲嶆柊璇诲彇鐨勫嚟鎹枃妗ｃ€?
+// ExportProviderCredentials 导出可由对应 Provider 导入接口重新读取的凭据文档。
 func (s *Service) ExportProviderCredentials(ctx context.Context, providerValue accountdomain.Provider) (ExportResult, error) {
 	if !providerValue.IsValid() {
-		return ExportResult{}, invalidInput("璐﹀彿鏉ユ簮鏃犳晥")
+		return ExportResult{}, invalidInput("账号来源无效")
 	}
 	if s.providers == nil {
-		return ExportResult{}, fmt.Errorf("Provider 娉ㄥ唽琛ㄦ湭鍒濆鍖?)
+		return ExportResult{}, fmt.Errorf("Provider 注册表未初始化")
 	}
 	adapter, ok := s.providers.CredentialCodec(providerValue)
 	if !ok {
-		return ExportResult{}, fmt.Errorf("Provider %s 涓嶆敮鎸佸嚟鎹鍑?, providerValue)
+		return ExportResult{}, fmt.Errorf("Provider %s 不支持凭据导出", providerValue)
 	}
 	values, total, err := s.accounts.List(ctx, repository.AccountListQuery{
 		Page:   repository.PageQuery{Limit: maxCredentialExportAccounts + 1},
@@ -1396,7 +1396,7 @@ func (s *Service) ExportProviderCredentials(ctx context.Context, providerValue a
 		return ExportResult{}, err
 	}
 	if total > maxCredentialExportAccounts {
-		return ExportResult{}, fmt.Errorf("%w: 鍗曟鏈€澶氬鍑?10000 涓处鍙?, ErrExportLimit)
+		return ExportResult{}, fmt.Errorf("%w: 单次最多导出 10000 个账号", ErrExportLimit)
 	}
 	seeds := make([]provider.CredentialSeed, 0, len(values))
 	for _, value := range values {
@@ -1407,25 +1407,25 @@ func (s *Service) ExportProviderCredentials(ctx context.Context, providerValue a
 		if value.EncryptedAccessToken != "" {
 			accessToken, err = s.cipher.Decrypt(value.EncryptedAccessToken)
 			if err != nil {
-				return ExportResult{}, fmt.Errorf("瑙ｅ瘑璐﹀彿 %d access token: %w", value.ID, err)
+				return ExportResult{}, fmt.Errorf("解密账号 %d access token: %w", value.ID, err)
 			}
 		}
 		refreshToken := ""
 		if value.EncryptedRefreshToken != "" {
 			refreshToken, err = s.cipher.Decrypt(value.EncryptedRefreshToken)
 			if err != nil {
-				return ExportResult{}, fmt.Errorf("瑙ｅ瘑璐﹀彿 %d refresh token: %w", value.ID, err)
+				return ExportResult{}, fmt.Errorf("解密账号 %d refresh token: %w", value.ID, err)
 			}
 		}
 		cloudflareCookies := ""
 		if value.EncryptedCloudflareCookie != "" {
 			cloudflareCookies, err = s.cipher.Decrypt(value.EncryptedCloudflareCookie)
 			if err != nil {
-				return ExportResult{}, fmt.Errorf("瑙ｅ瘑璐﹀彿 %d Cloudflare Cookie: %w", value.ID, err)
+				return ExportResult{}, fmt.Errorf("解密账号 %d Cloudflare Cookie: %w", value.ID, err)
 			}
 		}
 		if accessToken == "" && refreshToken == "" {
-			return ExportResult{}, fmt.Errorf("璐﹀彿 %d 娌℃湁鍙鍑虹殑鍑嵁", value.ID)
+			return ExportResult{}, fmt.Errorf("账号 %d 没有可导出的凭据", value.ID)
 		}
 		seeds = append(seeds, provider.CredentialSeed{
 			Provider: value.Provider, AuthType: value.AuthType, WebTier: value.WebTier,
@@ -1451,7 +1451,7 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 	if input.Name != nil {
 		value.Name = strings.TrimSpace(*input.Name)
 		if value.Name == "" {
-			return View{}, invalidInput("璐﹀彿鍚嶇О涓嶈兘涓虹┖")
+			return View{}, invalidInput("账号名称不能为空")
 		}
 	}
 	if input.Enabled != nil {
@@ -1462,13 +1462,13 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 	}
 	if input.MaxConcurrent != nil {
 		if *input.MaxConcurrent < 1 || *input.MaxConcurrent > accountdomain.MaxConcurrent {
-			return View{}, invalidInput("maxConcurrent 蹇呴』鍦?1 鍒?256 涔嬮棿")
+			return View{}, invalidInput("maxConcurrent 必须在 1 到 256 之间")
 		}
 		value.MaxConcurrent = *input.MaxConcurrent
 	}
 	if input.MinimumRemaining != nil {
 		if *input.MinimumRemaining < 0 {
-			return View{}, invalidInput("minimumRemaining 涓嶈兘灏忎簬闆?)
+			return View{}, invalidInput("minimumRemaining 不能小于零")
 		}
 		value.MinimumRemaining = *input.MinimumRemaining
 	}
@@ -1476,15 +1476,15 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 		value.EncryptedCloudflareCookie = ""
 	} else if input.CloudflareCookies != nil {
 		if value.Provider == accountdomain.ProviderBuild {
-			return View{}, invalidInput("Grok Build 璐﹀彿涓嶄娇鐢?Cloudflare Cookie")
+			return View{}, invalidInput("Grok Build 账号不使用 Cloudflare Cookie")
 		}
 		if len(*input.CloudflareCookies) > 16<<10 {
-			return View{}, invalidInput("Cloudflare Cookie 涓嶈兘瓒呰繃 16 KiB")
+			return View{}, invalidInput("Cloudflare Cookie 不能超过 16 KiB")
 		}
 		if strings.TrimSpace(*input.CloudflareCookies) != "" {
 			cookies := egressapp.SanitizeCloudflareCookies(*input.CloudflareCookies)
 			if cookies == "" {
-				return View{}, invalidInput("Cloudflare Cookie 涓病鏈夋湁鏁堝瓧娈?)
+				return View{}, invalidInput("Cloudflare Cookie 中没有有效字段")
 			}
 			encrypted, encryptErr := s.cipher.Encrypt(cookies)
 			if encryptErr != nil {
@@ -1495,16 +1495,16 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 	}
 	if input.BuildSuperEntitled != nil {
 		if value.Provider != accountdomain.ProviderBuild {
-			return View{}, invalidInput("浠?Grok Build 璐﹀彿鏀寔璁剧疆 Build Super entitlement")
+			return View{}, invalidInput("仅 Grok Build 账号支持设置 Build Super entitlement")
 		}
 		value.BuildSuperEntitled = *input.BuildSuperEntitled
 	}
 	if input.BuildRouteMode != nil {
 		if value.Provider != accountdomain.ProviderBuild {
-			return View{}, invalidInput("浠?Grok Build 璐﹀彿鏀寔璁剧疆涓婃父鍦板潃")
+			return View{}, invalidInput("仅 Grok Build 账号支持设置上游地址")
 		}
 		if !input.BuildRouteMode.IsValid() {
-			return View{}, invalidInput("Build 涓婃父鍦板潃蹇呴』鏄?auto銆乥uild 鎴?xai")
+			return View{}, invalidInput("Build 上游地址必须是 auto、build 或 xai")
 		}
 		value.BuildRouteMode = *input.BuildRouteMode
 	}
@@ -1520,7 +1520,7 @@ func (s *Service) Update(ctx context.Context, id uint64, input UpdateInput) (Vie
 	return s.Get(ctx, updated.ID)
 }
 
-// MarkBuildAPIFallback 骞傜瓑鍐欏叆 Build 璐﹀彿 XAI 鎺ㄧ悊鍥為€€鏍囪锛涘け璐ヤ笉鍚炴帀锛岃皟鐢ㄦ柟鍙噸璇曘€?
+// MarkBuildAPIFallback 幂等写入 Build 账号 XAI 推理回退标记；失败不吞掉，调用方可重试。
 func (s *Service) MarkBuildAPIFallback(ctx context.Context, id uint64, enabled bool) error {
 	return mapRepositoryError(s.accounts.MarkBuildAPIFallback(ctx, id, enabled))
 }
@@ -1556,8 +1556,8 @@ func (s *Service) MarkReauthRequired(ctx context.Context, id uint64, reason stri
 	return nil
 }
 
-// markSSOCredentialRejected 鍦ㄤ笂娓告槑纭繑鍥?401 鍚庡彲闈犳寔涔呭寲澶辨晥鐘舵€併€?
-// 鐘舵€佸啓鍏ヤ笉缁ф壙瀹㈡埛绔彇娑堬紝閬垮厤宸茬粡纭澶辨晥鐨勮处鍙峰洜璇锋眰鏂紑缁х画鐣欏湪鍙锋睜銆?
+// markSSOCredentialRejected 在上游明确返回 401 后可靠持久化失效状态。
+// 状态写入不继承客户端取消，避免已经确认失效的账号因请求断开继续留在号池。
 func (s *Service) markSSOCredentialRejected(ctx context.Context, value accountdomain.Credential, reason string) error {
 	if value.AuthType != accountdomain.AuthTypeSSO {
 		return nil
@@ -1571,7 +1571,7 @@ func (s *Service) markSSOCredentialRejected(ctx context.Context, value accountdo
 	return nil
 }
 
-// EnsureCredential 鍦ㄥ嵆灏嗚繃鏈熸椂鍒锋柊 token锛屽悓涓€璐﹀彿骞跺彂璇锋眰鍙墽琛屼竴娆″埛鏂般€?
+// EnsureCredential 在即将过期时刷新 token，同一账号并发请求只执行一次刷新。
 func (s *Service) EnsureCredential(ctx context.Context, value accountdomain.Credential, force bool) (accountdomain.Credential, error) {
 	return s.ensureCredential(ctx, value, force, false, false)
 }
@@ -1653,7 +1653,7 @@ func (s *Service) ensureCredential(ctx context.Context, value accountdomain.Cred
 		}
 		adapter, ok := s.providers.CredentialRefresh(latest.Provider)
 		if !ok {
-			return nil, fmt.Errorf("Provider %s 鏈敞鍐?, latest.Provider)
+			return nil, fmt.Errorf("Provider %s 未注册", latest.Provider)
 		}
 		refreshed, err := adapter.RefreshCredential(ctx, latest)
 		if err != nil {
@@ -1676,12 +1676,12 @@ func (s *Service) ensureCredential(ctx context.Context, value accountdomain.Cred
 	}
 	credential, ok := result.(accountdomain.Credential)
 	if !ok {
-		return accountdomain.Credential{}, fmt.Errorf("璐﹀彿鍑嵁鍒锋柊杩斿洖绫诲瀷鏃犳晥")
+		return accountdomain.Credential{}, fmt.Errorf("账号凭据刷新返回类型无效")
 	}
 	return credential, nil
 }
 
-// acquireRefreshLock 鍦?Redis 妯″紡涓嬬瓑寰呭叾浠栧疄渚嬪畬鎴愬埛鏂帮紝閿佺绾﹁繃鏈熷悗鍙嚜鍔ㄦ帴绠°€?
+// acquireRefreshLock 在 Redis 模式下等待其他实例完成刷新，锁租约过期后可自动接管。
 func (s *Service) acquireRefreshLock(ctx context.Context, accountID uint64) (func(), error) {
 	if s.refreshLock == nil {
 		return nil, nil
@@ -1764,8 +1764,8 @@ func (s *Service) recordCredentialRefreshFailure(ctx context.Context, credential
 	} else if errors.Is(refreshErr, context.DeadlineExceeded) {
 		errorCode = "oauth_timeout"
 	}
-	// 鐪熸鐨?OAuth 姘镐箙澶辫触锛坕nvalid_grant 绛夛級鍙兘鐢辨垚鍔熸崲 token 娓呴櫎銆?
-	// credential_decrypt_failed 鏄彲鎭㈠鏈湴閿欒锛氫笉寰楄鏃?permanent 绮樹綇锛屼篃涓嶅緱鎶婃湰娆″彲鎭㈠澶辫触鎶崌涓烘案涔呫€?
+	// 真正的 OAuth 永久失败（invalid_grant 等）只能由成功换 token 清除。
+	// credential_decrypt_failed 是可恢复本地错误：不得被旧 permanent 粘住，也不得把本次可恢复失败抬升为永久。
 	if permanent && isRecoverableRefreshErrorCode(errorCode) {
 		permanent = false
 	}
@@ -1776,7 +1776,7 @@ func (s *Service) recordCredentialRefreshFailure(ctx context.Context, credential
 	retryAt := now.Add(credentialRefreshBackoff(credential.ID, failureCount, retryAfter))
 	accessTokenAlive := credential.EncryptedAccessToken != "" && !credential.ExpiresAt.IsZero() && credential.ExpiresAt.After(now)
 	if permanent && accessTokenAlive {
-		// refresh token 宸叉案涔呭け鏁堟椂锛屾彁鍓嶉噸璇曟病鏈夋剰涔夛紱鍒?access token 鍒版湡鏃跺啀瀹屾垚澶辨晥鏀舵暃銆?
+		// refresh token 已永久失效时，提前重试没有意义；到 access token 到期时再完成失效收敛。
 		retryAt = credential.ExpiresAt
 	} else if permanent {
 		retryAt = now
@@ -1799,15 +1799,15 @@ func (s *Service) recordCredentialRefreshFailure(ctx context.Context, credential
 	s.WakeCredentialRefresh()
 }
 
-// resolvePermanentRefreshFailure 闃绘鍐嶆璇锋眰宸茬‘璁ゅけ鏁堢殑 refresh token锛屽苟鍦?access token 鍒版湡鍚庢敹鏁涜处鍙风姸鎬併€?
-// credential_decrypt_failed 灞炰簬鏈湴瀵嗛挜闂锛屽厑璁告墜鍔?force / 璋冨害閲嶈瘯锛堝瘑閽ユ仮澶嶅悗鍙嚜鎰堬級锛?
-// invalid_grant 绛夌湡姝?OAuth 姘镐箙澶辫触浠嶄繚鎸侀樆鏂€?
+// resolvePermanentRefreshFailure 阻止再次请求已确认失效的 refresh token，并在 access token 到期后收敛账号状态。
+// credential_decrypt_failed 属于本地密钥问题，允许手动 force / 调度重试（密钥恢复后可自愈）；
+// invalid_grant 等真正 OAuth 永久失败仍保持阻断。
 func (s *Service) resolvePermanentRefreshFailure(ctx context.Context, credential accountdomain.Credential, now time.Time, force bool) (accountdomain.Credential, error, bool) {
 	if !credential.RefreshPermanent {
 		return accountdomain.Credential{}, nil, false
 	}
 	if isRecoverableRefreshErrorCode(credential.LastRefreshErrorCode) {
-		// 鍏佽 force 鎴栧埌鏈熻皟搴﹀啀娆″皾璇曡В瀵?鍒锋柊锛涙垚鍔熷悗浼?clear permanent 鏍囪銆?
+		// 允许 force 或到期调度再次尝试解密/刷新；成功后会 clear permanent 标记。
 		return accountdomain.Credential{}, nil, false
 	}
 	accessTokenAlive := credential.EncryptedAccessToken != "" && !credential.ExpiresAt.IsZero() && credential.ExpiresAt.After(now)
@@ -1825,7 +1825,7 @@ func (s *Service) resolvePermanentRefreshFailure(ctx context.Context, credential
 	return accountdomain.Credential{}, fmt.Errorf("%w: %s", ErrCredentialRefreshPermanent, credential.LastRefreshErrorCode), true
 }
 
-// isRecoverableRefreshErrorCode 鏍囪瘑鈥滄案涔呮爣璁板彲琚悗缁垚鍔熷埛鏂版竻闄も€濈殑鏈湴/涓存椂閿欒銆?
+// isRecoverableRefreshErrorCode 标识“永久标记可被后续成功刷新清除”的本地/临时错误。
 func isRecoverableRefreshErrorCode(code string) bool {
 	switch strings.TrimSpace(code) {
 	case "credential_decrypt_failed":
@@ -1854,7 +1854,7 @@ func (s *Service) RefreshBilling(ctx context.Context, id uint64) (accountdomain.
 	}
 	billing, ok := result.(accountdomain.Billing)
 	if !ok {
-		return accountdomain.Billing{}, fmt.Errorf("棰濆害鍚屾杩斿洖绫诲瀷鏃犳晥")
+		return accountdomain.Billing{}, fmt.Errorf("额度同步返回类型无效")
 	}
 	return billing, nil
 }
@@ -1881,7 +1881,7 @@ func (s *Service) fetchAndSaveBilling(ctx context.Context, id uint64) (accountdo
 	}
 	adapter, ok := s.providers.Billing(value.Provider)
 	if !ok {
-		return accountdomain.Credential{}, accountdomain.Billing{}, fmt.Errorf("Provider %s 鏈敞鍐?, value.Provider)
+		return accountdomain.Credential{}, accountdomain.Billing{}, fmt.Errorf("Provider %s 未注册", value.Provider)
 	}
 	billing, err := adapter.GetBilling(ctx, value)
 	if err != nil {
@@ -1894,7 +1894,7 @@ func (s *Service) fetchAndSaveBilling(ctx context.Context, id uint64) (accountdo
 	return value, billing, nil
 }
 
-// ProbePaidQuota 鍦ㄧ湡瀹炶处鏈熷埌鏈熷悗鎵ц涓€娆?Billing 鎺㈡祴锛屼笉娑堣€楁ā鍨嬮搴︺€?
+// ProbePaidQuota 在真实账期到期后执行一次 Billing 探测，不消耗模型额度。
 func (s *Service) ProbePaidQuota(ctx context.Context, value accountdomain.Credential) (bool, error) {
 	latest, billing, err := s.fetchAndSaveBilling(ctx, value.ID)
 	if err != nil {
@@ -1936,7 +1936,7 @@ func (s *Service) reconcilePaidQuotaRecovery(ctx context.Context, credential acc
 	})
 }
 
-// HasBillingSnapshot 鍒ゆ柇璐﹀彿鏄惁宸茬粡瀹屾垚杩囦竴娆￠搴﹀悓姝ワ紝涓嶈Е鍙戜换浣曚笂娓歌姹傘€?
+// HasBillingSnapshot 判断账号是否已经完成过一次额度同步，不触发任何上游请求。
 func (s *Service) HasBillingSnapshot(ctx context.Context, id uint64) (bool, error) {
 	_, err := s.accounts.GetBilling(ctx, id)
 	if errors.Is(err, repository.ErrNotFound) {
@@ -2017,7 +2017,7 @@ func (s *Service) RefreshQuota(ctx context.Context, id uint64) ([]accountdomain.
 	}
 	windows, ok := result.([]accountdomain.QuotaWindow)
 	if !ok {
-		return nil, fmt.Errorf("Provider 棰濆害鍚屾杩斿洖绫诲瀷鏃犳晥")
+		return nil, fmt.Errorf("Provider 额度同步返回类型无效")
 	}
 	return windows, nil
 }
@@ -2033,7 +2033,7 @@ func (s *Service) refreshQuota(ctx context.Context, id uint64) ([]accountdomain.
 	}
 	adapter, ok := s.providers.Quota(value.Provider)
 	if !ok {
-		return nil, fmt.Errorf("%s Quota Provider 鏈敞鍐?, value.Provider)
+		return nil, fmt.Errorf("%s Quota Provider 未注册", value.Provider)
 	}
 	snapshot, err := adapter.SyncQuota(ctx, value)
 	if err != nil {
@@ -2056,19 +2056,19 @@ func (s *Service) refreshQuota(ctx context.Context, id uint64) ([]accountdomain.
 	for _, window := range snapshot.Windows {
 		if window.Remaining == 0 && window.ResetAt != nil && s.quotaQueue != nil {
 			if err := s.quotaQueue.ScheduleQuotaRecovery(ctx, accountdomain.QuotaRecoveryEvent{AccountID: id, Mode: window.Mode, DueAt: *window.ResetAt}); err != nil {
-				return snapshot.Windows, fmt.Errorf("瀹夋帓棰濆害鎭㈠浜嬩欢: %w", err)
+				return snapshot.Windows, fmt.Errorf("安排额度恢复事件: %w", err)
 			}
 		}
 	}
-	// 韬唤琛ュ叏鏄潪鍏抽敭鎿嶄綔锛氬彧鍦ㄩ搴﹁惤搴撳拰鎭㈠浠诲姟璋冨害瀹屾垚鍚庢墽琛岋紝
-	// 骞舵部鐢ㄨ皟鐢ㄦ柟鍙栨秷璇箟锛屼笉鑳藉弽鍚戝奖鍝嶉搴﹀悓姝ョ粨鏋溿€?
+	// 身份补全是非关键操作：只在额度落库和恢复任务调度完成后执行，
+	// 并沿用调用方取消语义，不能反向影响额度同步结果。
 	if (value.Provider == accountdomain.ProviderWeb || value.Provider == accountdomain.ProviderConsole) && ctx.Err() == nil {
 		if strings.TrimSpace(value.UserID) == "" && strings.TrimSpace(value.Email) == "" {
 			if identityErr := s.syncAccountIdentityBestEffort(ctx, id); errors.Is(identityErr, provider.ErrUnauthorized) {
 				return snapshot.Windows, identityErr
 			}
 		} else {
-			// 宸叉湁 Session 韬唤鏃跺彧鍋氭湰鍦板閲忓叧鑱旓紝涓嶅啀璁块棶涓婃父銆?
+			// 已有 Session 身份时只做本地增量关联，不再访问上游。
 			s.reconcileProviderLinksBestEffort(ctx, id)
 		}
 	}
@@ -2091,7 +2091,7 @@ func preserveActiveQuotaWindows(existing, incoming []accountdomain.QuotaWindow, 
 	return result
 }
 
-// ReconcileRateLimit 鏍规嵁棰濆害妯″紡鏍稿疄 429锛沇eb 鍛ㄦ睜缁х画浠ヤ笂娓稿揩鐓т负鍑嗐€?
+// ReconcileRateLimit 根据额度模式核实 429；Web 周池继续以上游快照为准。
 func (s *Service) ReconcileRateLimit(ctx context.Context, id uint64, mode string, retryAfter time.Duration) (bool, error) {
 	if mode == "weekly" {
 		window, err := s.RefreshQuotaMode(ctx, id, mode)
@@ -2125,7 +2125,7 @@ func (s *Service) RefreshQuotaMode(ctx context.Context, id uint64, mode string) 
 	}
 	window, ok := result.(accountdomain.QuotaWindow)
 	if !ok {
-		return accountdomain.QuotaWindow{}, fmt.Errorf("Provider 妯″紡棰濆害鍚屾杩斿洖绫诲瀷鏃犳晥")
+		return accountdomain.QuotaWindow{}, fmt.Errorf("Provider 模式额度同步返回类型无效")
 	}
 	return window, nil
 }
@@ -2141,7 +2141,7 @@ func (s *Service) refreshQuotaMode(ctx context.Context, id uint64, mode string) 
 	}
 	adapter, ok := s.providers.Quota(value.Provider)
 	if !ok {
-		return accountdomain.QuotaWindow{}, fmt.Errorf("%s Quota Provider 鏈敞鍐?, value.Provider)
+		return accountdomain.QuotaWindow{}, fmt.Errorf("%s Quota Provider 未注册", value.Provider)
 	}
 	window, err := adapter.SyncQuotaMode(ctx, value, mode)
 	if err != nil {
@@ -2153,8 +2153,8 @@ func (s *Service) refreshQuotaMode(ctx context.Context, id uint64, mode string) 
 	var tier accountdomain.WebTier
 	quotaKind, _ := s.providers.QuotaKind(value.Provider)
 	if quotaKind == provider.QuotaRemoteWindow {
-		// 鍗曟ā寮忔牳瀹炲彧璐熻矗鏇存柊鏈 429 瀵瑰簲鐨勭獥鍙ｃ€傚椁愬垽绾х敱瀹屾暣棰濆害鍚屾璐熻矗锛?
-		// 杩欓噷鍐嶆璋冪敤 SyncQuota 浼氶噸澶嶈姹傚綋鍓嶆ā寮忥紝骞堕澶栬闂叾浠栭搴︾鐐广€?
+		// 单模式核实只负责更新本次 429 对应的窗口。套餐判级由完整额度同步负责；
+		// 这里再次调用 SyncQuota 会重复请求当前模式，并额外访问其他额度端点。
 		tier = value.WebTier
 	}
 	now := time.Now().UTC()
@@ -2163,13 +2163,13 @@ func (s *Service) refreshQuotaMode(ctx context.Context, id uint64, mode string) 
 	}
 	if window.Remaining == 0 && window.ResetAt != nil && s.quotaQueue != nil {
 		if err := s.quotaQueue.ScheduleQuotaRecovery(ctx, accountdomain.QuotaRecoveryEvent{AccountID: id, Mode: mode, DueAt: *window.ResetAt}); err != nil {
-			return window, fmt.Errorf("瀹夋帓棰濆害鎭㈠浜嬩欢: %w", err)
+			return window, fmt.Errorf("安排额度恢复事件: %w", err)
 		}
 	}
 	return window, nil
 }
 
-// QueueQuotaRefresh 鍦ㄦ垚鍔熻皟鐢ㄥ悗寮傛鍚屾杩滅绐楀彛棰濆害锛涘綋鍓?Web Free 璐﹀彿鍚屾 Chat 妯″紡銆?
+// QueueQuotaRefresh 在成功调用后异步同步远端窗口额度；当前 Web Free 账号同步 Chat 模式。
 func (s *Service) QueueQuotaRefresh(id uint64, mode string) {
 	mode = strings.TrimSpace(mode)
 	if id == 0 || (mode != "" && mode != "weekly" && !isWebChatQuotaMode(mode)) {
@@ -2194,12 +2194,12 @@ func (s *Service) QueueQuotaRefresh(id uint64, mode string) {
 	}
 }
 
-// QueueWebQuotaRefresh 淇濈暀缁欑幇鏈夊唴閮ㄨ皟鐢ㄦ柟锛岀粺涓€瀹炵幇鐢?QueueQuotaRefresh 鎵挎媴銆?
+// QueueWebQuotaRefresh 保留给现有内部调用方，统一实现由 QueueQuotaRefresh 承担。
 func (s *Service) QueueWebQuotaRefresh(id uint64, mode string) {
 	s.QueueQuotaRefresh(id, mode)
 }
 
-// RunWebQuotaRefresh 浣跨敤鍥哄畾 Worker 鏁板鐞嗘垚鍔熻姹傚悗鐨勯搴﹀悓姝ワ紝閬垮厤鎸夎处鍙锋棤鐣屽垱寤?goroutine銆?
+// RunWebQuotaRefresh 使用固定 Worker 数处理成功请求后的额度同步，避免按账号无界创建 goroutine。
 func (s *Service) RunWebQuotaRefresh(ctx context.Context) {
 	var workers sync.WaitGroup
 	workers.Add(managedTaskWorkerCeiling)
@@ -2236,8 +2236,8 @@ func (s *Service) RunWebQuotaRefresh(ctx context.Context) {
 
 func (s *Service) runWebQuotaRefresh(parent context.Context, request webQuotaRefreshRequest) {
 	for {
-		// Worker 寮€濮嬪墠宸茬粡鍚堝苟鐨勯噸澶嶈姹傜敱鏈疆杩滅蹇収瑕嗙洊銆傚彧鏈夌綉缁滆姹?
-		// 杩涜鏈熼棿鍐嶆鍒拌揪鐨勮皟鐢ㄦ墠闇€瑕佸熬闅忓埛鏂帮紝閬垮厤姣忎釜绐佸彂鎵规鍥哄畾璇锋眰涓ゆ銆?
+		// Worker 开始前已经合并的重复请求由本轮远端快照覆盖。只有网络请求
+		// 进行期间再次到达的调用才需要尾随刷新，避免每个突发批次固定请求两次。
 		s.quotaRefreshMu.Lock()
 		state := s.quotaRefreshes[request.key]
 		if state == nil {
@@ -2328,14 +2328,14 @@ func isWebChatQuotaMode(mode string) bool {
 	}
 }
 
-// SyncAllBilling 灏藉姏鍒锋柊鍏ㄩ儴鍚敤璐﹀彿锛屽崟涓处鍙峰け璐ヤ笉闃绘柇鍏朵粬璐﹀彿銆?
+// SyncAllBilling 尽力刷新全部启用账号，单个账号失败不阻断其他账号。
 func (s *Service) SyncAllBilling(ctx context.Context) (int, int, error) {
 	return s.SyncAllBillingWithProgress(ctx, nil)
 }
 
 func (s *Service) SyncAllBillingWithProgress(ctx context.Context, progress BatchProgressObserver) (int, int, error) {
 	if s.providers == nil {
-		return 0, 0, fmt.Errorf("Provider 娉ㄥ唽琛ㄦ湭鍒濆鍖?)
+		return 0, 0, fmt.Errorf("Provider 注册表未初始化")
 	}
 	ids := make([]uint64, 0)
 	for _, providerValue := range s.providers.Providers() {
@@ -2352,7 +2352,7 @@ func (s *Service) SyncAllBillingWithProgress(ctx context.Context, progress Batch
 	return s.refreshBillings(ctx, ids, progress)
 }
 
-// SyncAllWebQuotas 灏藉姏鍚屾鍏ㄩ儴鍚敤 Grok Web 璐﹀彿鐨勫垎妯″紡棰濆害銆?
+// SyncAllWebQuotas 尽力同步全部启用 Grok Web 账号的分模式额度。
 func (s *Service) SyncAllWebQuotas(ctx context.Context) (int, int, error) {
 	return s.SyncAllWebQuotasWithProgress(ctx, nil)
 }
@@ -2380,7 +2380,7 @@ func (s *Service) syncAllQuotasWithProgress(ctx context.Context, providerValue a
 	})
 }
 
-// SyncWebQuotaAccounts 鍚屾鎸囧畾 Web 璐﹀彿闆嗗悎锛屼緵鍚姩杩借刀浠诲姟澶嶇敤鍏变韩骞跺彂姹犮€?
+// SyncWebQuotaAccounts 同步指定 Web 账号集合，供启动追赶任务复用共享并发池。
 func (s *Service) SyncWebQuotaAccounts(ctx context.Context, ids []uint64) (int, int, error) {
 	return s.runAccountBatch(ctx, "web_quota_startup_catchup", ids, s.syncPool, nil, func(workCtx context.Context, id uint64) error {
 		_, err := s.RefreshWebQuota(workCtx, id)
@@ -2388,14 +2388,14 @@ func (s *Service) SyncWebQuotaAccounts(ctx context.Context, ids []uint64) (int, 
 	})
 }
 
-// RefreshAllTokens 缁湡鎵€鏈夊０鏄庢敮鎸佸埛鏂扮殑 Provider 鍑嵁锛屼笉鍙画鏈熻处鍙蜂細琚烦杩囥€?
+// RefreshAllTokens 续期所有声明支持刷新的 Provider 凭据，不可续期账号会被跳过。
 func (s *Service) RefreshAllTokens(ctx context.Context) (int, int, int, error) {
 	return s.RefreshAllTokensWithProgress(ctx, nil)
 }
 
 func (s *Service) RefreshAllTokensWithProgress(ctx context.Context, progress BatchProgressObserver) (int, int, int, error) {
 	if s.providers == nil {
-		return 0, 0, 0, fmt.Errorf("Provider 娉ㄥ唽琛ㄦ湭鍒濆鍖?)
+		return 0, 0, 0, fmt.Errorf("Provider 注册表未初始化")
 	}
 	allIDs := make([]uint64, 0)
 	ids := make([]uint64, 0)
@@ -2429,14 +2429,14 @@ func (s *Service) refreshTokens(ctx context.Context, ids []uint64, progress Batc
 	})
 }
 
-// BatchRefreshTokens 缁湡鎸囧畾璐﹀彿鐨勫嚟鎹紱鍋滅敤銆佸け鏁堟垨缂哄皯鍒锋柊鍑嵁鐨勮处鍙蜂細琚烦杩囥€?
+// BatchRefreshTokens 续期指定账号的凭据；停用、失效或缺少刷新凭据的账号会被跳过。
 func (s *Service) BatchRefreshTokens(ctx context.Context, ids []uint64) (int, int, int, error) {
 	values, err := normalizeBatchIDs(ids)
 	if err != nil {
 		return 0, 0, 0, err
 	}
 	if s.providers == nil {
-		return 0, 0, 0, fmt.Errorf("Provider 娉ㄥ唽琛ㄦ湭鍒濆鍖?)
+		return 0, 0, 0, fmt.Errorf("Provider 注册表未初始化")
 	}
 	refreshableIDs := make([]uint64, 0, len(values))
 	for _, id := range values {
@@ -2454,7 +2454,7 @@ func (s *Service) BatchRefreshTokens(ctx context.Context, ids []uint64) (int, in
 	return succeeded, failed, skipped, err
 }
 
-// BatchRefreshBilling 浣跨敤鏈夐檺骞跺彂鍒锋柊閫変腑璐﹀彿锛岄伩鍏嶅ぇ閲忚处鍙峰悓姝ユ椂涓茶闃诲鎴栨棤鐣屽垱寤?goroutine銆?
+// BatchRefreshBilling 使用有限并发刷新选中账号，避免大量账号同步时串行阻塞或无界创建 goroutine。
 func (s *Service) BatchRefreshBilling(ctx context.Context, ids []uint64) (int, int, error) {
 	values, err := normalizeBatchIDs(ids)
 	if err != nil {
@@ -2463,7 +2463,7 @@ func (s *Service) BatchRefreshBilling(ctx context.Context, ids []uint64) (int, i
 	return s.refreshBillings(ctx, values, nil)
 }
 
-// BatchRefreshQuota 浣跨敤鏈夐檺骞跺彂鍚屾閫変腑 Web 鎴?Console 璐﹀彿鐨勯搴︾獥鍙ｃ€?
+// BatchRefreshQuota 使用有限并发同步选中 Web 或 Console 账号的额度窗口。
 func (s *Service) BatchRefreshQuota(ctx context.Context, ids []uint64) (int, int, error) {
 	values, err := normalizeBatchIDs(ids)
 	if err != nil {
@@ -2630,7 +2630,7 @@ func (s *Service) credentialFromSeed(seed provider.CredentialSeed) (accountdomai
 	if strings.TrimSpace(seed.CloudflareCookies) != "" {
 		cookies := egressapp.SanitizeCloudflareCookies(seed.CloudflareCookies)
 		if cookies == "" {
-			return accountdomain.Credential{}, invalidInput("Cloudflare Cookie 涓病鏈夋湁鏁堝瓧娈?)
+			return accountdomain.Credential{}, invalidInput("Cloudflare Cookie 中没有有效字段")
 		}
 		cloudflareEncrypted, err = s.cipher.Encrypt(cookies)
 		if err != nil {
@@ -2648,11 +2648,11 @@ func (s *Service) credentialFromSeed(seed provider.CredentialSeed) (accountdomai
 	authType := seed.AuthType
 	if authType == "" {
 		if s.providers == nil {
-			return accountdomain.Credential{}, fmt.Errorf("Provider 娉ㄥ唽琛ㄦ湭鍒濆鍖?)
+			return accountdomain.Credential{}, fmt.Errorf("Provider 注册表未初始化")
 		}
 		definition, ok := s.providers.Definition(providerValue)
 		if !ok {
-			return accountdomain.Credential{}, fmt.Errorf("Provider %s 鏈敞鍐?, providerValue)
+			return accountdomain.Credential{}, fmt.Errorf("Provider %s 未注册", providerValue)
 		}
 		authType = definition.Credential.AuthType
 	}
@@ -2673,16 +2673,16 @@ func normalizeBatchIDs(ids []uint64) ([]uint64, error) {
 
 func normalizeIDs(ids []uint64, limit int) ([]uint64, error) {
 	if len(ids) == 0 {
-		return nil, invalidInput("鑷冲皯閫夋嫨涓€涓处鍙?)
+		return nil, invalidInput("至少选择一个账号")
 	}
 	if len(ids) > limit {
-		return nil, invalidInput(fmt.Sprintf("鍗曟鏈€澶氬鐞?%d 涓处鍙?, limit))
+		return nil, invalidInput(fmt.Sprintf("单次最多处理 %d 个账号", limit))
 	}
 	seen := make(map[uint64]struct{}, len(ids))
 	result := make([]uint64, 0, len(ids))
 	for _, id := range ids {
 		if id == 0 {
-			return nil, invalidInput("璐﹀彿 ID 鏃犳晥")
+			return nil, invalidInput("账号 ID 无效")
 		}
 		if _, ok := seen[id]; ok {
 			continue
@@ -2693,12 +2693,12 @@ func normalizeIDs(ids []uint64, limit int) ([]uint64, error) {
 	return result, nil
 }
 
-// invalidInput 涓哄彲瀹夊叏杩斿洖缁欑鐞嗙鐨勮处鍙峰弬鏁伴敊璇檮鍔犵ǔ瀹氳涔夈€?
+// invalidInput 为可安全返回给管理端的账号参数错误附加稳定语义。
 func invalidInput(message string) error {
 	return fmt.Errorf("%w: %s", ErrInvalidInput, message)
 }
 
-// mapRepositoryError 闅旂鎸佷箙鍖栧眰閿欒锛岄伩鍏?transport 渚濊禆浠撳偍瀹炵幇璇箟銆?
+// mapRepositoryError 隔离持久化层错误，避免 transport 依赖仓储实现语义。
 func mapRepositoryError(err error) error {
 	if errors.Is(err, repository.ErrNotFound) {
 		return ErrNotFound
