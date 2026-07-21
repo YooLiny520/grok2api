@@ -57,6 +57,10 @@ const (
 	maxBuildConversionAccounts                = 1000
 	maxWebConsoleSyncAccounts                 = 1000
 	accountTaskBatchSize                      = 1000
+	accountBatchWaveSize                      = 30
+	accountBatchWavePause       time.Duration = 8 * time.Second
+	accountBatchRateLimitRetries              = 4
+	accountBatchRateLimitBase   time.Duration = 2 * time.Second
 	buildBotFlagCacheTTL        time.Duration = 30 * time.Second
 )
 
@@ -303,7 +307,7 @@ func NewService(accounts repository.AccountRepository, audits repository.AuditRe
 		},
 		autoCleanWake:     make(chan struct{}, 1),
 		buildBotFlagCache: resultcache.New[string, []uint64](1, buildBotFlagCacheTTL),
-		conversionPool:    batch.NewPool(25), syncPool: batch.NewPool(25), refreshPool: batch.NewPool(25), logger: slog.Default(),
+		conversionPool:    batch.NewPool(25), syncPool: batch.NewPool(5), refreshPool: batch.NewPool(8), logger: slog.Default(),
 		now: func() time.Time { return time.Now().UTC() },
 	}
 }
@@ -2477,37 +2481,120 @@ func (s *Service) refreshBillings(ctx context.Context, ids []uint64, progress Ba
 }
 
 func (s *Service) runAccountBatch(ctx context.Context, operation string, ids []uint64, pool *batch.Pool, progress BatchProgressObserver, work func(context.Context, uint64) error) (int, int, error) {
+	if len(ids) == 0 {
+		return 0, 0, nil
+	}
 	if progress != nil {
 		if err := progress(0, len(ids)); err != nil {
 			return 0, 0, err
 		}
 	}
-	var progressMu sync.Mutex
-	var progressErr error
-	completed := 0
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	results, summary, err := batch.MapObserved(runCtx, ids, batch.Options{Workers: pool.Limit(), Pool: pool}, func(workCtx context.Context, id uint64) (struct{}, error) {
-		return struct{}{}, work(workCtx, id)
-	}, func(_ int, _ batch.Result[struct{}]) {
-		progressMu.Lock()
-		defer progressMu.Unlock()
-		completed++
-		if progress != nil {
-			if notifyErr := progress(completed, len(ids)); notifyErr != nil && progressErr == nil {
-				progressErr = notifyErr
-				cancel()
-			}
-		}
-	})
-	for index, result := range results {
-		var panicErr *batch.PanicError
-		if errors.As(result.Err, &panicErr) {
-			s.logger.Error("account_bulk_task_panicked", "operation", operation, "account_id", ids[index], "error", panicErr, "stack", string(panicErr.Stack))
+	waveSize := accountBatchWaveSize
+	if pool != nil {
+		if limit := pool.Limit(); limit > 0 {
+			// Keep each wave near a few rounds of the shared concurrency budget.
+			waveSize = min(40, max(15, limit*4))
 		}
 	}
-	s.logBatchSummary(operation, pool, summary, err)
-	return summary.Succeeded, summary.Failed, errors.Join(err, progressErr)
+	totalSucceeded := 0
+	totalFailed := 0
+	completed := 0
+	var progressErr error
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	waveCount := (len(ids) + waveSize - 1) / waveSize
+	for wave := 0; wave < waveCount; wave++ {
+		if err := runCtx.Err(); err != nil {
+			return totalSucceeded, totalFailed, errors.Join(err, progressErr)
+		}
+		start := wave * waveSize
+		end := min(start+waveSize, len(ids))
+		chunk := ids[start:end]
+		var progressMu sync.Mutex
+		results, summary, err := batch.MapObserved(runCtx, chunk, batch.Options{Workers: pool.Limit(), Pool: pool}, func(workCtx context.Context, id uint64) (struct{}, error) {
+			return struct{}{}, withUpstreamRateLimitRetry(workCtx, func(retryCtx context.Context) error {
+				return work(retryCtx, id)
+			})
+		}, func(_ int, _ batch.Result[struct{}]) {
+			progressMu.Lock()
+			defer progressMu.Unlock()
+			completed++
+			if progress != nil {
+				if notifyErr := progress(completed, len(ids)); notifyErr != nil && progressErr == nil {
+					progressErr = notifyErr
+					cancel()
+				}
+			}
+		})
+		for index, result := range results {
+			var panicErr *batch.PanicError
+			if errors.As(result.Err, &panicErr) {
+				s.logger.Error("account_bulk_task_panicked", "operation", operation, "account_id", chunk[index], "error", panicErr, "stack", string(panicErr.Stack))
+			}
+		}
+		totalSucceeded += summary.Succeeded
+		totalFailed += summary.Failed
+		s.logBatchSummary(operation, pool, summary, err)
+		if err != nil || progressErr != nil {
+			return totalSucceeded, totalFailed, errors.Join(err, progressErr)
+		}
+		if wave+1 < waveCount {
+			pause := accountBatchWavePause
+			s.logger.Info("account_bulk_wave_pause", "operation", operation, "wave", wave+1, "waves", waveCount, "pause_ms", pause.Milliseconds(), "completed", completed, "total", len(ids))
+			timer := time.NewTimer(pause)
+			select {
+			case <-runCtx.Done():
+				timer.Stop()
+				return totalSucceeded, totalFailed, errors.Join(runCtx.Err(), progressErr)
+			case <-timer.C:
+			}
+		}
+	}
+	return totalSucceeded, totalFailed, progressErr
+}
+
+// isUpstreamRateLimited reports whether an account bulk task should be retried after backoff.
+func isUpstreamRateLimited(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, provider.ErrRateLimited) {
+		return true
+	}
+	if status, ok := provider.ErrorHTTPStatus(err); ok && status == 429 {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "429") || strings.Contains(msg, "too many requests") || strings.Contains(msg, "rate limit") || strings.Contains(msg, "rate limited")
+}
+
+// withUpstreamRateLimitRetry retries transient upstream 429 responses during bulk account tasks.
+func withUpstreamRateLimitRetry(ctx context.Context, work func(context.Context) error) error {
+	var err error
+	for attempt := 0; attempt <= accountBatchRateLimitRetries; attempt++ {
+		if err = ctx.Err(); err != nil {
+			return err
+		}
+		err = work(ctx)
+		if err == nil || !isUpstreamRateLimited(err) {
+			return err
+		}
+		if attempt == accountBatchRateLimitRetries {
+			break
+		}
+		delay := accountBatchRateLimitBase << attempt
+		if delay > 30*time.Second {
+			delay = 30 * time.Second
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return err
 }
 
 func (s *Service) logBatchSummary(operation string, pool *batch.Pool, summary batch.Summary, err error) {

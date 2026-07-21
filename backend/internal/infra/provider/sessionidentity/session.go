@@ -66,6 +66,9 @@ func Fetch(ctx context.Context, baseURL string, credential account.Credential, e
 	if response.StatusCode == http.StatusUnauthorized {
 		return provider.AccountIdentity{}, provider.ErrUnauthorized
 	}
+	if response.StatusCode == http.StatusTooManyRequests {
+		return provider.AccountIdentity{}, fmt.Errorf("%w: Grok Session 接口返回 429", provider.ErrRateLimited)
+	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return provider.AccountIdentity{}, fmt.Errorf("Grok Session 接口返回 %d", response.StatusCode)
 	}

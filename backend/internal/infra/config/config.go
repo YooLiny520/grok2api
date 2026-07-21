@@ -471,8 +471,8 @@ func (c Config) Validate() error {
 		c.Batch.RefreshConcurrency < 1 || c.Batch.RefreshConcurrency > 50 {
 		return errors.New("批量任务并发必须在 1 到 50 之间")
 	}
-	if c.Batch.RandomDelay.Value() < 0 || c.Batch.RandomDelay.Value() > 5*time.Second {
-		return errors.New("批量任务随机延迟必须在 0 到 5 秒之间")
+	if c.Batch.RandomDelay.Value() < 0 || c.Batch.RandomDelay.Value() > 30*time.Second {
+		return errors.New("批量任务随机延迟必须在 0 到 30 秒之间")
 	}
 	if c.Provider.Web.RecoveryBackoffBase.Value() < 5*time.Second || c.Provider.Web.RecoveryBackoffMax.Value() < c.Provider.Web.RecoveryBackoffBase.Value() || c.Provider.Web.RecoveryBackoffMax.Value() > 6*time.Hour {
 		return errors.New("provider.web 恢复退避配置无效")
@@ -571,8 +571,8 @@ func defaultConfig() Config {
 			Console: ConsoleProviderConfig{BaseURL: "https://console.x.ai", ChatTimeout: Duration(5 * time.Minute)},
 		},
 		Batch: BatchConfig{
-			ImportConcurrency: 25, ConversionConcurrency: 25, SyncConcurrency: 25,
-			RefreshConcurrency: 25, RandomDelay: Duration(500 * time.Millisecond),
+			ImportConcurrency: 25, ConversionConcurrency: 25, SyncConcurrency: 5,
+			RefreshConcurrency: 8, RandomDelay: Duration(1500 * time.Millisecond),
 		},
 		Media: MediaConfig{
 			Driver: "local", MaxImageBytes: 32 << 20, MaxTotalBytes: 1 << 30,

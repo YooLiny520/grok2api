@@ -162,7 +162,7 @@ func (p *Pool) Do(ctx context.Context, work func(context.Context) error) (err er
 
 func (p *Pool) waitJitter(ctx context.Context) error {
 	maximum := p.jitter.Load()
-	if maximum <= 0 || p.Limit() <= 1 {
+	if maximum <= 0 {
 		return nil
 	}
 	delay := time.Duration(rand.Int64N(maximum))

@@ -19,6 +19,7 @@ var (
 	ErrAuthorizationDenied  = errors.New("authorization denied")
 	ErrCredentialLimit      = errors.New("credential count exceeds limit")
 	ErrUnauthorized         = errors.New("upstream credential unauthorized")
+	ErrRateLimited          = errors.New("upstream rate limited")
 	ErrBirthDateAlreadySet  = errors.New("upstream birth date is already set")
 )
 
